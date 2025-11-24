@@ -10,6 +10,7 @@
 - 💾 **数据持久化**: 自动将历史数据保存到 PostgreSQL 数据库，方便后续分析。
 - 🚨 **低余额报警**: 当余额低于设定阈值时，自动发送通知。
 - 📢 **多渠道通知**: 目前支持 Telegram Bot、Webhook 和控制台输出。
+- 🐳 **Docker 支持**: 提供完整的 Docker 镜像构建和 Docker Compose 配置，支持 Docker Secrets。
 
 ## 快速开始
 
@@ -17,12 +18,30 @@
 
 - [Rust](https://www.rust-lang.org/tools/install) (编译环境)
 - [PostgreSQL](https://www.postgresql.org/) (数据存储)
+- [uestc-client](https://github.com/kasuha07/uestc-client) (依赖库，仅本地编译需要)
 
-### 2. 获取代码
+### 2. 获取代码与依赖
+
+由于本项目依赖 `uestc-client`，如果选择**本地编译**，请确保将其克隆到与本项目**同级**的目录中。
 
 ```bash
+# 创建一个工作目录
+mkdir uestc-workspace
+cd uestc-workspace
+
+# 1. 克隆依赖库
+git clone https://github.com/kasuha07/uestc-client.git
+
+# 2. 克隆本项目
 git clone https://github.com/yourusername/uestc-power-monitor.git
 cd uestc-power-monitor
+```
+
+目录结构应如下所示：
+```
+uestc-workspace/
+├── uestc-client/
+└── uestc-power-monitor/
 ```
 
 ### 3. 配置文件
@@ -54,9 +73,9 @@ cargo build --release
 ./target/release/uestc-power-monitor
 ```
 
-### 6. Docker 部署
+### 6. Docker 部署 (推荐)
 
-本项目支持 Docker 部署，包含自动构建和数据库配置。
+本项目支持 Docker 部署，包含自动构建和数据库配置。Docker 构建过程会自动处理依赖关系，无需手动克隆 `uestc-client`。
 
 1. **准备配置**: 复制 `config.toml.example` 为 `config.toml` 并填入账号信息。
 2. **启动服务**:
@@ -64,13 +83,43 @@ cargo build --release
    docker-compose up -d --build
    ```
 
-**注意**:
-- Docker 部署会自动下载 `uestc-client` 依赖进行构建。
-- `docker-compose.yml` 中已预设了数据库连接的环境变量 `UPM_DATABASE_URL`，它会覆盖 `config.toml` 中的数据库设置，确保连接到容器内的数据库。
+**注意**: `docker-compose.yml` 中已预设了数据库连接的环境变量 `UPM_DATABASE_URL`，它会覆盖 `config.toml` 中的数据库设置，确保连接到容器内的数据库。
+
+## 配置详解
+
+配置加载优先级：**环境变量 > Docker Secrets > 配置文件**。
+
+### 1. 配置文件 (config.toml)
+
+完整配置项请参考 `config.toml.example`。
+
+### 2. 环境变量
+
+所有配置项均可通过环境变量设置，前缀为 `UPM_`。层级结构使用双下划线 `__` 分隔。
+
+| 环境变量 | 对应配置项 | 说明 |
+| --- | --- | --- |
+| `UPM_USERNAME` | `username` | 学号 |
+| `UPM_PASSWORD` | `password` | 密码 |
+| `UPM_DATABASE_URL` | `database_url` | 数据库连接字符串 |
+| `UPM_INTERVAL_SECONDS` | `interval_seconds` | 轮询间隔(秒) |
+| `UPM_NOTIFY__ENABLED` | `notify.enabled` | 是否启用通知 (true/false) |
+| `UPM_NOTIFY__NOTIFY_TYPE` | `notify.notify_type` | 通知类型 (console/webhook/telegram) |
+| `UPM_NOTIFY__TELEGRAM_BOT_TOKEN` | `notify.telegram_bot_token` | Telegram Bot Token |
+| `UPM_NOTIFY__TELEGRAM_CHAT_ID` | `notify.telegram_chat_id` | Telegram Chat ID |
+
+### 3. Docker Secrets
+
+支持从 `/run/secrets/` 目录读取敏感信息，适合 Docker Swarm 或 Kubernetes 环境。
+
+- `username`: `/run/secrets/username`
+- `password`: `/run/secrets/password`
+- `service_url`: `/run/secrets/service_url`
+- `database_url`: `/run/secrets/database_url`
 
 ## 数据表结构
 
-程序会自动创建 `power_records` 表，结构如下：
+程序会自动创建 `power_records` 表，主要包含以下字段：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -85,4 +134,3 @@ cargo build --release
 ## License
 
 MIT
-
