@@ -6,8 +6,10 @@ pub mod notify;
 use crate::api::ApiService;
 use crate::config::AppConfig;
 use crate::db::DbService;
+use crate::notify::create_notifier;
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Starting Uestc Power Monitor...");
     let config = match AppConfig::new() {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -15,12 +17,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err(e.into());
         }
     };
-
+    // initialize services
     let api_service = ApiService::new(&config).await?;
     let db_service = DbService::new(config.database_url.clone()).await?;
     db_service.init().await?;
-    let notifier = crate::notify::create_notifier(&config.notify);
+    let notifier = create_notifier(&config.notify);
 
+    // main loop
     loop {
         match api_service.fetch_data().await {
             Ok(Some(data)) => {
