@@ -57,3 +57,44 @@ impl Notifier for WebhookNotifier {
         })
     }
 }
+
+pub struct TelegramNotifier {
+    client: reqwest::Client,
+    bot_token: String,
+    chat_id: String,
+}
+
+impl TelegramNotifier {
+    pub fn new(bot_token: String, chat_id: String) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            bot_token,
+            chat_id,
+        }
+    }
+}
+
+impl Notifier for TelegramNotifier {
+    fn notify<'a>(
+        &'a self,
+        info: &'a PowerInfo,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            let message = format!(
+                "⚠️ [Low Power Warning]\nRoom: {}\nMoney: {:.2} CNY\nEnergy: {:.2} kWh",
+                info.room_display_name, info.remaining_money, info.remaining_energy
+            );
+
+            let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
+            let params = [("chat_id", &self.chat_id), ("text", &message)];
+
+            self.client
+                .post(&url)
+                .form(&params)
+                .send()
+                .await?
+                .error_for_status()?;
+            Ok(())
+        })
+    }
+}

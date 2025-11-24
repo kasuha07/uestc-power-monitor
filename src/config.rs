@@ -32,6 +32,10 @@ pub struct NotifyConfig {
     pub notify_type: NotifyType,
     #[serde(default)]
     pub webhook_url: String,
+    #[serde(default)]
+    pub telegram_bot_token: String,
+    #[serde(default)]
+    pub telegram_chat_id: String,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -40,6 +44,7 @@ pub enum NotifyType {
     #[default]
     Console,
     Webhook,
+    Telegram,
 }
 
 impl AppConfig {
