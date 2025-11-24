@@ -10,10 +10,33 @@ pub struct AppConfig {
     pub database_url: String,
     #[serde(default = "default_interval")]
     pub interval_seconds: u64,
+    #[serde(default)]
+    pub notify: NotifyConfig,
 }
 
 fn default_interval() -> u64 {
     60
+}
+
+fn default_threshold() -> f64 {
+    10.0
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct NotifyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_threshold")]
+    pub threshold: f64,
+    #[serde(default)]
+    pub notify_type: NotifyType,
+}
+
+#[derive(Debug, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyType {
+    #[default]
+    Console,
 }
 
 impl AppConfig {
