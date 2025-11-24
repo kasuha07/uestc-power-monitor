@@ -12,7 +12,7 @@ use uestc_client::UestcClient;
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = match AppConfig::new() {
-        Ok(cfg) => Arc::new(cfg),
+        Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("Failed to load configuration: {}", e);
             return Err(e.into());
@@ -25,7 +25,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     db_service.init().await?;
 
     let notifier: Option<Box<dyn Notifier>> = if config.notify.enabled {
-        match config.notify.notify_type {
+        match &config.notify.notify_type {
             NotifyType::Console => Some(Box::new(ConsoleNotifier)),
             NotifyType::Webhook => Some(Box::new(WebhookNotifier::new(
                 config.notify.webhook_url.clone(),
