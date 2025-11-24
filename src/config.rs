@@ -7,6 +7,7 @@ pub struct AppConfig {
     pub username: String,
     pub password: String,
     pub service_url: Option<String>,
+    pub database_url: String,
     #[serde(default = "default_interval")]
     pub interval_seconds: u64,
 }
@@ -30,6 +31,7 @@ impl AppConfig {
             ("username", "/run/secrets/username"),
             ("password", "/run/secrets/password"),
             ("service_url", "/run/secrets/service_url"),
+            ("database_url", "/run/secrets/database_url"),
         ];
 
         let mut secrets_map = std::collections::HashMap::new();

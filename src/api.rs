@@ -1,4 +1,3 @@
-use crate::config::AppConfig;
 use serde::Deserialize;
 use std::sync::Arc;
 use uestc_client::UestcClient;
@@ -7,12 +6,11 @@ const BASE_URL: &str = "https://online.uestc.edu.cn/site";
 
 pub struct ApiService {
     client: Arc<UestcClient>,
-    config: Arc<AppConfig>,
 }
 
 impl ApiService {
-    pub fn new(client: Arc<UestcClient>, config: Arc<AppConfig>) -> Self {
-        Self { client, config }
+    pub fn new(client: Arc<UestcClient>) -> Self {
+        Self { client }
     }
 
     pub async fn fetch_data(&self) -> Result<Option<PowerInfo>, Box<dyn std::error::Error>> {
