@@ -7,7 +7,7 @@ edition = "2024"
 uestc-client = { path = "../uestc-client" , version = "0.1.0" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
-config = "0.15.19"
-sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "chrono"] }
+config = "0.15"
+sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.12.24", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
