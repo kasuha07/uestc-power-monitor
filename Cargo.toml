@@ -1,0 +1,8 @@
+[package]
+name = "uestc-power-monitor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+uestc-client = { path = "../uestc-client" , version = "0.1.0" }
+tokio = { version = "1", features = ["full"] }
