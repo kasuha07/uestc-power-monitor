@@ -1,16 +1,24 @@
+use crate::config::AppConfig;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use uestc_client::UestcClient;
 
 const BASE_URL: &str = "https://online.uestc.edu.cn/site";
 
 pub struct ApiService {
-    client: Arc<UestcClient>,
+    client: UestcClient,
 }
 
 impl ApiService {
-    pub fn new(client: Arc<UestcClient>) -> Self {
-        Self { client }
+    pub async fn new(config: &AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let client = UestcClient::new();
+        client
+            .login(
+                &config.username,
+                &config.password,
+                config.service_url.as_deref(),
+            )
+            .await?;
+        Ok(Self { client })
     }
 
     pub async fn fetch_data(&self) -> Result<Option<PowerInfo>, Box<dyn std::error::Error>> {

@@ -7,8 +7,6 @@ use crate::api::ApiService;
 use crate::config::{AppConfig, NotifyType};
 use crate::db::DbService;
 use crate::notify::{ConsoleNotifier, Notifier, TelegramNotifier, WebhookNotifier};
-use std::sync::Arc;
-use uestc_client::UestcClient;
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = match AppConfig::new() {
@@ -19,8 +17,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let client = Arc::new(UestcClient::new());
-    let api_service = ApiService::new(client.clone());
+    let api_service = ApiService::new(&config).await?;
     let db_service = DbService::new(config.database_url.clone()).await?;
     db_service.init().await?;
 
