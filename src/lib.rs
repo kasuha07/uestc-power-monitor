@@ -19,7 +19,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Arc::new(UestcClient::new());
     let api_service = ApiService::new(client.clone());
-    let db_service = DbService::new(config.clone()).await?;
+    let db_service = DbService::new(config.database_url.clone()).await?;
     db_service.init().await?;
 
     loop {

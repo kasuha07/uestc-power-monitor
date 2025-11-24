@@ -1,22 +1,19 @@
 use crate::api::PowerInfo;
-use crate::config::AppConfig;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Pool, Postgres};
-use std::sync::Arc;
 
 pub struct DbService {
-    config: Arc<AppConfig>,
     pool: Pool<Postgres>,
 }
 
 impl DbService {
-    pub async fn new(config: Arc<AppConfig>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(database_url: String) -> Result<Self, Box<dyn std::error::Error>> {
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect(&config.database_url)
+            .connect(&database_url)
             .await?;
 
-        Ok(Self { config, pool })
+        Ok(Self { pool })
     }
 
     pub async fn init(&self) -> Result<(), Box<dyn std::error::Error>> {
