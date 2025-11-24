@@ -3,7 +3,7 @@ username = "your_student_id"
 password = "your_password"
 
 # 监控轮询间隔（秒）
-interval_seconds = 60
+interval_seconds = 600
 
 # 服务基础 URL (通常无需修改)
 service_url = "https://online.uestc.edu.cn"
@@ -14,8 +14,11 @@ database_url = "postgresql://user:password@localhost:5432/uestc_power_monitor"
 # 通知配置
 [notify]
 enabled = true            # 是否启用通知
-threshold = 10.0          # 余额报警阈值（元）
-notify_type = "telegram"  # 通知类型: console, webhook, telegram
+threshold = 5.0          # 余额报警阈值（元）
+cooldown_minutes = 520    # 报警冷却时间（分钟）
+heartbeat_enabled = true  # 是否启用每日心跳通知
+heartbeat_hour = 9        # 每日心跳通知时间（0-23）
+notify_type = "console"  # 通知类型: console, webhook, telegram
 
 # Webhook 配置 (仅 notify_type = "webhook" 时需要)
 webhook_url = "https://webhook.site/..."

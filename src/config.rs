@@ -15,11 +15,19 @@ pub struct AppConfig {
 }
 
 fn default_interval() -> u64 {
-    60
+    600 // 10 minutes
 }
 
 fn default_threshold() -> f64 {
-    10.0
+    5.0 // 5 yuan
+}
+
+fn default_cooldown_minutes() -> u64 {
+    520 // 8 hours 40 minutes
+}
+
+fn default_heartbeat_hour() -> u32 {
+    9 // 9:00 AM
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -28,6 +36,12 @@ pub struct NotifyConfig {
     pub enabled: bool,
     #[serde(default = "default_threshold")]
     pub threshold: f64,
+    #[serde(default = "default_cooldown_minutes")]
+    pub cooldown_minutes: u64,
+    #[serde(default)]
+    pub heartbeat_enabled: bool,
+    #[serde(default = "default_heartbeat_hour")]
+    pub heartbeat_hour: u32,
     #[serde(default)]
     pub notify_type: NotifyType,
     #[serde(default)]
