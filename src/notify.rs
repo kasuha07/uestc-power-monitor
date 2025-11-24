@@ -4,6 +4,7 @@ use chrono::{Local, Timelike};
 use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NotificationEvent {
@@ -40,9 +41,9 @@ impl NotificationManager {
             if now.hour() == self.config.heartbeat_hour {
                 let today = now.date_naive();
                 if self.last_heartbeat_date != Some(today) {
-                    println!("Sending daily heartbeat...");
+                    info!("Sending daily heartbeat...");
                     if let Err(e) = notifier.notify(data, NotificationEvent::Heartbeat).await {
-                        eprintln!("Failed to send heartbeat: {}", e);
+                        error!("Failed to send heartbeat: {}", e);
                     } else {
                         self.last_heartbeat_date = Some(today);
                     }
@@ -81,7 +82,7 @@ impl NotificationManager {
 
             if should_notify {
                 if let Err(e) = notifier.notify(data, NotificationEvent::LowBalance).await {
-                    eprintln!("Failed to notify low balance: {}", e);
+                    error!("Failed to notify low balance: {}", e);
                 } else {
                     self.last_low_balance_notify_time = Some(now);
                 }
@@ -126,13 +127,13 @@ impl Notifier for ConsoleNotifier {
         Box::pin(async move {
             match event {
                 NotificationEvent::LowBalance => {
-                    println!(
+                    warn!(
                         "⚠️ [Low Power Warning] Room: {}, Money: {:.2} CNY, Energy: {:.2} kWh",
                         info.room_display_name, info.remaining_money, info.remaining_energy
                     );
                 }
                 NotificationEvent::Heartbeat => {
-                    println!(
+                    info!(
                         "ℹ️ [Daily Report] Room: {}, Money: {:.2} CNY, Energy: {:.2} kWh",
                         info.room_display_name, info.remaining_money, info.remaining_energy
                     );

@@ -1,6 +1,7 @@
 use crate::api::PowerInfo;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Pool, Postgres};
+use tracing::{debug, info};
 
 pub struct DbService {
     pool: Pool<Postgres>,
@@ -17,7 +18,7 @@ impl DbService {
     }
 
     pub async fn init(&self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Initializing DB...");
+        info!("Initializing DB...");
 
         sqlx::query(
             r#"
@@ -42,7 +43,7 @@ impl DbService {
     }
 
     pub async fn save_data(&self, data: &PowerInfo) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Saving data to database...");
+        debug!("Saving data to database...");
 
         sqlx::query(
             r#"

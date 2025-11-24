@@ -10,12 +10,14 @@ use crate::notify::NotificationManager;
 use std::time::Duration;
 use tokio::time::sleep;
 
+use tracing::{error, info, warn};
+
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting Uestc Power Monitor...");
+    info!("Starting Uestc Power Monitor...");
     let config = match AppConfig::new() {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("Failed to load configuration: {}", e);
+            error!("Failed to load configuration: {}", e);
             return Err(e.into());
         }
     };
@@ -32,7 +34,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(Some(data)) => {
                 // save data to database
                 if let Err(e) = db_service.save_data(&data).await {
-                    eprintln!("Failed to save data: {}", e);
+                    error!("Failed to save data: {}", e);
                 }
 
                 // notify logic
@@ -41,10 +43,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Ok(None) => {
-                println!("No data available");
+                warn!("No data available");
             }
             Err(e) => {
-                eprintln!("Failed to fetch data: {}", e);
+                error!("Failed to fetch data: {}", e);
             }
         }
 
