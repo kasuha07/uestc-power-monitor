@@ -42,13 +42,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match api_service.fetch_data().await {
             Ok(Some(data)) => {
+                // save data to database
                 if let Err(e) = db_service.save_data(&data).await {
                     eprintln!("Failed to save data: {}", e);
                 }
 
+                // notify if remaining money is less than threshold
                 if let Some(notifier) = &notifier {
-                    // TODO: Add debounce or state tracking to avoid spamming notifications
-                    if data.remaining_money < config.notify.threshold {
+                    if data.remaining_money <= config.notify.threshold {
                         if let Err(e) = notifier.notify(&data).await {
                             eprintln!("Failed to notify: {}", e);
                         }
