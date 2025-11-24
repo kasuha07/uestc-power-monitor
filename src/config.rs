@@ -7,6 +7,12 @@ pub struct AppConfig {
     pub username: String,
     pub password: String,
     pub service_url: Option<String>,
+    #[serde(default = "default_interval")]
+    pub interval_seconds: u64,
+}
+
+fn default_interval() -> u64 {
+    60
 }
 
 impl AppConfig {

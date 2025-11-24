@@ -1,13 +1,7 @@
-use uestc_client::UestcClient;
-use uestc_power_monitor::config::AppConfig;
-
 #[tokio::main]
 async fn main() {
-    let config = match AppConfig::new() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("Failed to load configuration: {}", e);
-            std::process::exit(1);
-        }
-    };
+    if let Err(e) = uestc_power_monitor::run().await {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
 }
