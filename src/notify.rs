@@ -1,9 +1,11 @@
 use crate::api::PowerInfo;
 use crate::config::{NotifyConfig, NotifyType};
+use crate::utils::retry;
 use chrono::{Local, Timelike};
 use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,7 +44,13 @@ impl NotificationManager {
                 let today = now.date_naive();
                 if self.last_heartbeat_date != Some(today) {
                     info!("Sending daily heartbeat...");
-                    if let Err(e) = notifier.notify(data, NotificationEvent::Heartbeat).await {
+                    if let Err(e) = retry(
+                        || notifier.notify(data, NotificationEvent::Heartbeat),
+                        3,
+                        Duration::from_secs(2),
+                    )
+                    .await
+                    {
                         error!("Failed to send heartbeat: {}", e);
                     } else {
                         self.last_heartbeat_date = Some(today);
@@ -81,7 +89,13 @@ impl NotificationManager {
             };
 
             if should_notify {
-                if let Err(e) = notifier.notify(data, NotificationEvent::LowBalance).await {
+                if let Err(e) = retry(
+                    || notifier.notify(data, NotificationEvent::LowBalance),
+                    3,
+                    Duration::from_secs(2),
+                )
+                .await
+                {
                     error!("Failed to notify low balance: {}", e);
                 } else {
                     self.last_low_balance_notify_time = Some(now);

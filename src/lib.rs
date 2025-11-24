@@ -2,11 +2,13 @@ pub mod api;
 pub mod config;
 pub mod db;
 pub mod notify;
+pub mod utils;
 
 use crate::api::ApiService;
 use crate::config::AppConfig;
 use crate::db::DbService;
 use crate::notify::NotificationManager;
+use crate::utils::retry;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -22,7 +24,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     // initialize services
-    let api_service = ApiService::new(&config).await?;
+    let api_service = retry(|| ApiService::new(&config), 3, Duration::from_secs(5)).await?;
     let db_service = DbService::new(config.database_url.clone()).await?;
     db_service.init().await?;
     let mut notification_manager = NotificationManager::new(config.notify.clone());
@@ -30,7 +32,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // main loop
     loop {
-        match api_service.fetch_data().await {
+        match retry(|| api_service.fetch_data(), 3, Duration::from_secs(2)).await {
             Ok(Some(data)) => {
                 // save data to database
                 if let Err(e) = db_service.save_data(&data).await {
