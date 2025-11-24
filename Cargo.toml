@@ -10,3 +10,4 @@ serde = { version = "1.0.228", features = ["derive"] }
 config = "0.15.19"
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12.24", features = ["json"] }

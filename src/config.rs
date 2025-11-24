@@ -30,6 +30,8 @@ pub struct NotifyConfig {
     pub threshold: f64,
     #[serde(default)]
     pub notify_type: NotifyType,
+    #[serde(default)]
+    pub webhook_url: String,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -37,6 +39,7 @@ pub struct NotifyConfig {
 pub enum NotifyType {
     #[default]
     Console,
+    Webhook,
 }
 
 impl AppConfig {

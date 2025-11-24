@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uestc_client::UestcClient;
 
@@ -27,7 +27,7 @@ impl ApiService {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PowerInfo {
     /// retcode: 返回代码
     #[serde(rename = "retcode")]

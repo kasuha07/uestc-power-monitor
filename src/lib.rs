@@ -6,7 +6,7 @@ pub mod notify;
 use crate::api::ApiService;
 use crate::config::{AppConfig, NotifyType};
 use crate::db::DbService;
-use crate::notify::{ConsoleNotifier, Notifier};
+use crate::notify::{ConsoleNotifier, Notifier, WebhookNotifier};
 use std::sync::Arc;
 use uestc_client::UestcClient;
 
@@ -27,6 +27,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let notifier: Option<Box<dyn Notifier>> = if config.notify.enabled {
         match config.notify.notify_type {
             NotifyType::Console => Some(Box::new(ConsoleNotifier)),
+            NotifyType::Webhook => Some(Box::new(WebhookNotifier::new(
+                config.notify.webhook_url.clone(),
+            ))),
         }
     } else {
         None
