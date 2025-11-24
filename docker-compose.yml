@@ -1,0 +1,32 @@
+services:
+  app:
+    build: .
+    image: uestc-power-monitor:latest
+    container_name: uestc-power-monitor
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      # Override database URL to point to the db service
+      - UPM_DATABASE_URL=postgres://uestc:uestc_password@db:5432/uestc_power_monitor
+      # You can set credentials here or in config.toml
+      # - UPM_USERNAME=your_student_id
+      # - UPM_PASSWORD=your_password
+    volumes:
+      # Mount local configuration file
+      - ./config.toml:/app/config.toml
+
+  db:
+    image: postgres:15-alpine
+    container_name: uestc-power-monitor-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: uestc
+      POSTGRES_PASSWORD: uestc_password
+      POSTGRES_DB: uestc_power_monitor
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+volumes:
+  db_data:
+
