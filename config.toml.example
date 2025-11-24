@@ -1,0 +1,13 @@
+username = "your_username"
+password = "your_password"
+interval_seconds = 60
+service_url = "https://online.uestc.edu.cn"
+database_url = "postgresql://db_user:db_password@localhost:5432/uestc_power_monitor"
+notify = {
+    enabled = true,
+    threshold = 5.0,
+    notify_type = "console", # console, webhook, telegram
+    webhook_url = "https://webhook.site/your_webhook_url",
+    telegram_bot_token = "your_telegram_bot_token",
+    telegram_chat_id = "your_telegram_chat_id",
+}
