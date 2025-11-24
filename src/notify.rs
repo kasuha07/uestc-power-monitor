@@ -1,4 +1,5 @@
 use crate::api::PowerInfo;
+use crate::config::{NotifyConfig, NotifyType};
 use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
@@ -8,6 +9,23 @@ pub trait Notifier: Send + Sync {
         &'a self,
         info: &'a PowerInfo,
     ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>>;
+}
+
+pub fn create_notifier(config: &NotifyConfig) -> Option<Box<dyn Notifier>> {
+    if !config.enabled {
+        return None;
+    }
+
+    match config.notify_type {
+        NotifyType::Console => Some(Box::new(ConsoleNotifier)),
+        NotifyType::Webhook => Some(Box::new(WebhookNotifier::new(
+            config.webhook_url.clone(),
+        ))),
+        NotifyType::Telegram => Some(Box::new(TelegramNotifier::new(
+            config.telegram_bot_token.clone(),
+            config.telegram_chat_id.clone(),
+        ))),
+    }
 }
 
 pub struct ConsoleNotifier;

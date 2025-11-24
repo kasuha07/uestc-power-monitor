@@ -4,9 +4,8 @@ pub mod db;
 pub mod notify;
 
 use crate::api::ApiService;
-use crate::config::{AppConfig, NotifyType};
+use crate::config::AppConfig;
 use crate::db::DbService;
-use crate::notify::{ConsoleNotifier, Notifier, TelegramNotifier, WebhookNotifier};
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = match AppConfig::new() {
@@ -20,21 +19,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let api_service = ApiService::new(&config).await?;
     let db_service = DbService::new(config.database_url.clone()).await?;
     db_service.init().await?;
-
-    let notifier: Option<Box<dyn Notifier>> = if config.notify.enabled {
-        match &config.notify.notify_type {
-            NotifyType::Console => Some(Box::new(ConsoleNotifier)),
-            NotifyType::Webhook => Some(Box::new(WebhookNotifier::new(
-                config.notify.webhook_url.clone(),
-            ))),
-            NotifyType::Telegram => Some(Box::new(TelegramNotifier::new(
-                config.notify.telegram_bot_token.clone(),
-                config.notify.telegram_chat_id.clone(),
-            ))),
-        }
-    } else {
-        None
-    };
+    let notifier = crate::notify::create_notifier(&config.notify);
 
     loop {
         match api_service.fetch_data().await {
