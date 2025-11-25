@@ -1,18 +1,10 @@
 # Build stage
 FROM rust:latest AS builder
 
-# Set working directory to /usr/src to manage sibling dependencies
-WORKDIR /usr/src
-
-# Clone the uestc-client dependency required by Cargo.toml
-# This ensures the build works standalone without requiring the user to manually provide the dependency folder.
-RUN git clone https://github.com/kasuha07/uestc-client.git
+WORKDIR /usr/src/app
 
 # Copy the project files
-COPY . uestc-power-monitor
-
-# Switch to the project directory
-WORKDIR /usr/src/uestc-power-monitor
+COPY . .
 
 # Build the application in release mode
 RUN cargo build --release
@@ -29,7 +21,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binary from the builder stage
-COPY --from=builder /usr/src/uestc-power-monitor/target/release/uestc-power-monitor /usr/local/bin/uestc-power-monitor
+COPY --from=builder /usr/src/app/target/release/uestc-power-monitor /usr/local/bin/uestc-power-monitor
 
 # Set the working directory
 WORKDIR /app
@@ -39,4 +31,3 @@ WORKDIR /app
 
 # Run the application
 CMD ["uestc-power-monitor"]
-

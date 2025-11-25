@@ -18,30 +18,12 @@
 
 - [Rust](https://www.rust-lang.org/tools/install) (编译环境)
 - [PostgreSQL](https://www.postgresql.org/) (数据存储)
-- [uestc-client](https://github.com/kasuha07/uestc-client) (依赖库，仅本地编译需要)
 
-### 2. 获取代码与依赖
-
-由于本项目依赖 `uestc-client`，如果选择**本地编译**，请确保将其克隆到与本项目**同级**的目录中。
+### 2. 获取代码
 
 ```bash
-# 创建一个工作目录
-mkdir uestc-workspace
-cd uestc-workspace
-
-# 1. 克隆依赖库
-git clone https://github.com/kasuha07/uestc-client.git
-
-# 2. 克隆本项目
 git clone https://github.com/yourusername/uestc-power-monitor.git
 cd uestc-power-monitor
-```
-
-目录结构应如下所示：
-```
-uestc-workspace/
-├── uestc-client/
-└── uestc-power-monitor/
 ```
 
 ### 3. 配置文件
@@ -75,7 +57,7 @@ cargo build --release
 
 ### 6. Docker 部署 (推荐)
 
-本项目支持 Docker 部署，包含自动构建和数据库配置。Docker 构建过程会自动处理依赖关系，无需手动克隆 `uestc-client`。
+本项目支持 Docker 部署，包含自动构建和数据库配置。
 
 1. **准备配置**: 复制 `config.toml.example` 为 `config.toml` 并填入账号信息。
 2. **启动服务**:
