@@ -6,7 +6,7 @@ use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NotificationEvent {
@@ -37,9 +37,11 @@ impl NotificationManager {
     pub async fn check_and_notify(&mut self, data: &PowerInfo) {
         let notifier = &self.notifier;
         let now = Local::now();
+        debug!("Checking notification conditions at {}", now);
 
         // Heartbeat Check
         if self.config.enabled && self.config.heartbeat_enabled {
+            debug!("Heartbeat enabled, checking conditions...");
             if now.hour() == self.config.heartbeat_hour {
                 let today = now.date_naive();
                 if self.last_heartbeat_date != Some(today) {
@@ -54,8 +56,13 @@ impl NotificationManager {
                         error!("Failed to send heartbeat: {}", e);
                     } else {
                         self.last_heartbeat_date = Some(today);
+                        debug!("Heartbeat sent successfully");
                     }
+                } else {
+                    debug!("Heartbeat already sent today");
                 }
+            } else {
+                debug!("Not heartbeat hour yet (current: {}, target: {})", now.hour(), self.config.heartbeat_hour);
             }
         }
 
@@ -64,31 +71,41 @@ impl NotificationManager {
             let current_balance = data.remaining_money;
             let threshold = self.config.threshold;
             let is_low = current_balance <= threshold;
+            debug!("Balance check: current={:.2}, threshold={:.2}, is_low={}",
+                current_balance, threshold, is_low);
 
             let should_notify = if is_low {
                 if let Some(last_b) = self.last_balance {
                     if last_b > threshold {
                         // Edge trigger: changed from high to low
+                        debug!("Balance dropped below threshold (edge trigger)");
                         true
                     } else {
                         // Already low, check cooldown
                         if let Some(last_time) = self.last_low_balance_notify_time {
                             let elapsed = now.signed_duration_since(last_time);
-                            elapsed.num_minutes() >= self.config.cooldown_minutes as i64
+                            let should = elapsed.num_minutes() >= self.config.cooldown_minutes as i64;
+                            debug!("Balance still low, cooldown check: elapsed={}min, cooldown={}min, should_notify={}",
+                                elapsed.num_minutes(), self.config.cooldown_minutes, should);
+                            should
                         } else {
                             // Should not happen if logic is correct, but safe fallback
+                            debug!("Balance low but no last notify time (fallback)");
                             true
                         }
                     }
                 } else {
                     // First run and low
+                    debug!("First run with low balance");
                     true
                 }
             } else {
+                debug!("Balance is above threshold, no notification needed");
                 false
             };
 
             if should_notify {
+                debug!("Sending low balance notification...");
                 if let Err(e) = retry(
                     || notifier.notify(data, NotificationEvent::LowBalance),
                     3,
@@ -99,6 +116,7 @@ impl NotificationManager {
                     error!("Failed to notify low balance: {}", e);
                 } else {
                     self.last_low_balance_notify_time = Some(now);
+                    debug!("Low balance notification sent successfully");
                 }
             }
 
@@ -117,9 +135,11 @@ pub trait Notifier: Send + Sync {
 
 pub fn create_notifier(config: &NotifyConfig) -> Option<Box<dyn Notifier>> {
     if !config.enabled {
+        debug!("Notifications disabled");
         return None;
     }
 
+    debug!("Creating notifier of type: {:?}", config.notify_type);
     match config.notify_type {
         NotifyType::Console => Some(Box::new(ConsoleNotifier)),
         NotifyType::Webhook => Some(Box::new(WebhookNotifier::new(config.webhook_url.clone()))),
@@ -183,6 +203,7 @@ impl Notifier for WebhookNotifier {
                 NotificationEvent::LowBalance => "low_balance",
                 NotificationEvent::Heartbeat => "heartbeat",
             };
+            debug!("Sending webhook notification: event={}, url={}", event_str, self.url);
             self.client
                 .post(&self.url)
                 .header("X-Event-Type", event_str)
@@ -190,6 +211,7 @@ impl Notifier for WebhookNotifier {
                 .send()
                 .await?
                 .error_for_status()?;
+            debug!("Webhook notification sent successfully");
             Ok(())
         })
     }
@@ -229,6 +251,7 @@ impl Notifier for TelegramNotifier {
             );
 
             let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
+            debug!("Sending Telegram notification to chat_id: {}", self.chat_id);
             let params = [("chat_id", &self.chat_id), ("text", &message)];
 
             self.client
@@ -237,6 +260,7 @@ impl Notifier for TelegramNotifier {
                 .send()
                 .await?
                 .error_for_status()?;
+            debug!("Telegram notification sent successfully");
             Ok(())
         })
     }

@@ -5,11 +5,8 @@ password = "your_password"
 # 监控轮询间隔（秒）
 interval_seconds = 600
 
-# 服务基础 URL (通常无需修改)
-service_url = "https://online.uestc.edu.cn"
-
-# PostgreSQL 数据库连接地址
-database_url = "postgresql://user:password@localhost:5432/uestc_power_monitor"
+# SQLite 数据库连接地址
+database_url = "sqlite://power_monitor.db"
 
 # 通知配置
 [notify]

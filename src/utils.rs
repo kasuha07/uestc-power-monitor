@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::warn;
+use tracing::{debug, warn};
 
 pub async fn retry<F, Fut, T, E>(
     mut operation: F,
@@ -13,12 +13,18 @@ where
     Fut: Future<Output = Result<T, E>>,
     E: std::fmt::Display,
 {
+    debug!("Starting retry operation with max_retries={}, initial_delay={:?}", max_retries, initial_delay);
     let mut delay = initial_delay;
     for i in 0..max_retries {
+        debug!("Retry attempt {}/{}", i + 1, max_retries);
         match operation().await {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                debug!("Operation succeeded on attempt {}/{}", i + 1, max_retries);
+                return Ok(value);
+            }
             Err(e) => {
                 if i == max_retries - 1 {
+                    debug!("All retry attempts exhausted");
                     return Err(e);
                 }
                 warn!(
@@ -30,6 +36,7 @@ where
                 );
                 sleep(delay).await;
                 delay *= 2; // Exponential backoff
+                debug!("Next retry delay: {:?}", delay);
             }
         }
     }

@@ -13,7 +13,7 @@ RUN cargo build --release
 FROM debian:bookworm-slim
 
 # Install necessary runtime dependencies
-# libssl3: Required for HTTPS requests and database connections
+# libssl3: Required for HTTPS requests
 # ca-certificates: Required for verifying SSL certificates
 RUN apt-get update && apt-get install -y \
     libssl3 \

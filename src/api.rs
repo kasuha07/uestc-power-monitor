@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 use uestc_client::UestcClient;
 
 const BASE_URL: &str = "https://online.uestc.edu.cn/site";
@@ -10,26 +11,44 @@ pub struct ApiService {
 
 impl ApiService {
     pub async fn new(config: &AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        debug!("Creating new API service for user: {}", config.username);
         let client = UestcClient::new();
+        debug!("Attempting login...");
         client
             .login(
                 &config.username,
                 &config.password,
-                config.service_url.as_deref(),
             )
             .await?;
+        debug!("Login successful");
+
+        // Initialize session with forced CAS authentication
+        let init_url = "https://online.uestc.edu.cn/common/actionCasLogin?redirect_url=https://online.uestc.edu.cn/page/";
+        debug!("Initializing session with CAS authentication...");
+        client.get(init_url).send().await?;
+        debug!("Session initialized");
+
         Ok(Self { client })
     }
 
     pub async fn fetch_data(&self) -> Result<Option<PowerInfo>, Box<dyn std::error::Error>> {
         let url = format!("{}/bedroom", BASE_URL);
+        debug!("Fetching power data from: {}", url);
         let resp = self
             .client
             .get(&url)
+            .header("Referer", "https://online.uestc.edu.cn/page/")
+            .header("Accept", "application/json, text/plain, */*")
             .send()
             .await?
             .json::<ApiResponse<PowerInfo>>()
             .await?;
+
+        debug!("API response: error={}, message={}", resp.error, resp.message);
+        if let Some(ref data) = resp.data {
+            debug!("Power info received: room={}, money={:.2}, energy={:.2}",
+                data.room_display_name, data.remaining_money, data.remaining_energy);
+        }
 
         Ok(resp.data)
     }

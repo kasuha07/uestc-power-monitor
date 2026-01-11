@@ -1,32 +1,23 @@
 services:
   app:
-    build: .
-    image: uestc-power-monitor:latest
+    # Use pre-built image from GitHub Container Registry
+    image: ghcr.io/kasuha07/uestc-power-monitor:latest
+    # Or build locally (uncomment the line below and comment out the image line above)
+    # build: .
     container_name: uestc-power-monitor
     restart: unless-stopped
-    depends_on:
-      - db
-    environment:
-      # Override database URL to point to the db service
-      - UPM_DATABASE_URL=postgres://uestc:uestc_password@db:5432/uestc_power_monitor
-      # You can set credentials here or in config.toml
-      # - UPM_USERNAME=your_student_id
-      # - UPM_PASSWORD=your_password
     volumes:
       # Mount local configuration file
       - ./config.toml:/app/config.toml
-
-  db:
-    image: postgres:15-alpine
-    container_name: uestc-power-monitor-db
-    restart: unless-stopped
+      # Mount data directory for SQLite database persistence
+      - ./data:/app/data
     environment:
-      POSTGRES_USER: uestc
-      POSTGRES_PASSWORD: uestc_password
-      POSTGRES_DB: uestc_power_monitor
-    volumes:
-      - db_data:/var/lib/postgresql/data
-
-volumes:
-  db_data:
+      # Override database URL to use persistent volume
+      - UPM_DATABASE_URL=sqlite://data/power_monitor.db
+      # You can set credentials here or in config.toml
+      # - UPM_USERNAME=your_student_id
+      # - UPM_PASSWORD=your_password
+      # Proxy settings (uncomment if needed)
+      # - HTTPS_PROXY=http://proxy.example.com:8080
+      # - HTTP_PROXY=http://proxy.example.com:8080
 

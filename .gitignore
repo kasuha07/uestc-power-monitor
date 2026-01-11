@@ -1,2 +1,7 @@
 /target
 config.toml
+uestc_cookies.json
+*.db
+*.db-shm
+*.db-wal
+/data
