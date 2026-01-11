@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-uestc-client = { version = "0.2.0", path = "../uestc-client" }
+uestc-client = "0.2.0"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
 config = "0.15"
