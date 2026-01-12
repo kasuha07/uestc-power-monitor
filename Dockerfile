@@ -1,6 +1,6 @@
 # === Stage 1: Planner ===
 # Calculate dependency fingerprint to optimize build caching
-FROM rust:latest AS planner
+FROM rust:1-bookworm AS planner
 WORKDIR /usr/src/app
 RUN cargo install cargo-chef
 COPY . .
@@ -8,7 +8,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # === Stage 2: Cacher ===
 # Build only dependencies (including vendored OpenSSL) and cache them
-FROM rust:latest AS cacher
+FROM rust:1-bookworm AS cacher
 WORKDIR /usr/src/app
 RUN cargo install cargo-chef
 COPY --from=planner /usr/src/app/recipe.json recipe.json
@@ -16,7 +16,7 @@ COPY --from=planner /usr/src/app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # === Stage 3: Builder ===
-FROM rust:latest AS builder
+FROM rust:1-bookworm AS builder
 WORKDIR /usr/src/app
 COPY . .
 # Copy pre-built dependencies from cacher stage
