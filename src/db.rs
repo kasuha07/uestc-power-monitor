@@ -41,6 +41,11 @@ impl DbService {
 
     pub async fn init(&self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Initializing DB...");
+
+        // Enable WAL mode for better performance
+        sqlx::query("PRAGMA journal_mode=WAL").execute(&self.pool).await?;
+        sqlx::query("PRAGMA synchronous=NORMAL").execute(&self.pool).await?;
+
         debug!("Creating power_records table if not exists...");
 
         sqlx::query(
