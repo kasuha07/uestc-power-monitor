@@ -1,52 +1,104 @@
 use crate::config::AppConfig;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info};
 use uestc_client::UestcClient;
 
 const BASE_URL: &str = "https://online.uestc.edu.cn/site";
 
 pub struct ApiService {
     client: UestcClient,
+    config: AppConfig,
 }
 
 impl ApiService {
     pub async fn new(config: &AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
         debug!("Creating new API service for user: {}", config.username);
         let client = UestcClient::new();
+
+        let service = Self {
+            client,
+            config: config.clone(),
+        };
+
+        service.login().await?;
+        Ok(service)
+    }
+
+    async fn login(&self) -> Result<(), Box<dyn std::error::Error>> {
         debug!("Attempting login...");
-        client
-            .login(
-                &config.username,
-                &config.password,
-            )
+        self.client
+            .login(&self.config.username, &self.config.password)
             .await?;
         debug!("Login successful");
 
         // Initialize session with forced CAS authentication
         let init_url = "https://online.uestc.edu.cn/common/actionCasLogin?redirect_url=https://online.uestc.edu.cn/page/";
         debug!("Initializing session with CAS authentication...");
-        client.get(init_url).send().await?;
+        self.client.get(init_url).send().await?;
         debug!("Session initialized");
 
-        Ok(Self { client })
+        Ok(())
+    }
+
+    async fn check_session(&self) -> bool {
+        debug!("Checking session validity...");
+        let url = "https://online.uestc.edu.cn/common/getLanguageTypes.htl";
+        match self.client.post(url).send().await {
+            Ok(resp) => match resp.json::<SessionCheckResponse>().await {
+                Ok(data) => {
+                    let is_valid = data.success;
+                    debug!("Session check result: valid={}", is_valid);
+                    is_valid
+                }
+                Err(e) => {
+                    debug!("Failed to parse session check response: {}", e);
+                    false
+                }
+            },
+            Err(e) => {
+                debug!("Session check request failed: {}", e);
+                false
+            }
+        }
     }
 
     pub async fn fetch_data(&self) -> Result<Option<PowerInfo>, Box<dyn std::error::Error>> {
         let url = format!("{}/bedroom", BASE_URL);
         debug!("Fetching power data from: {}", url);
-        let resp = self
+
+        let result = self
             .client
             .get(&url)
             .header("Referer", "https://online.uestc.edu.cn/page/")
             .header("Accept", "application/json, text/plain, */*")
             .send()
-            .await?
-            .json::<ApiResponse<PowerInfo>>()
-            .await?;
+            .await;
+
+        // If request fails, check session and retry once
+        let resp = match result {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("Request failed: {}, checking session...", e);
+                if !self.check_session().await {
+                    debug!("Session invalid, re-login and retry...");
+                    self.login().await?;
+                    self.client
+                        .get(&url)
+                        .header("Referer", "https://online.uestc.edu.cn/page/")
+                        .header("Accept", "application/json, text/plain, */*")
+                        .send()
+                        .await?
+                } else {
+                    return Err(e.into());
+                }
+            }
+        };
+
+        let resp = resp.json::<ApiResponse<PowerInfo>>().await?;
 
         debug!("API response: error={}, message={}", resp.error, resp.message);
         if let Some(ref data) = resp.data {
-            debug!("Power info received: room={}, money={:.2}, energy={:.2}",
+            info!("Power info received: room={}, money={:.2}, energy={:.2}",
                 data.room_display_name, data.remaining_money, data.remaining_energy);
         }
 
@@ -117,4 +169,9 @@ pub struct ApiResponse<T> {
 
     #[serde(rename = "d")]
     pub data: Option<T>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionCheckResponse {
+    success: bool,
 }

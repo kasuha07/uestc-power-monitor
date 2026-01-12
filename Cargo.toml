@@ -1,10 +1,10 @@
 [package]
 name = "uestc-power-monitor"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
-uestc-client = "0.2.0"
+uestc-client = "0.2.1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
 config = "0.15"
@@ -13,3 +13,4 @@ chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+openssl = { version = "0.10", features = ["vendored"] }
