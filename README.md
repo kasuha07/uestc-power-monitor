@@ -9,6 +9,7 @@
 - 🔌 **自动轮询**: 定时获取电费余额和剩余电量。
 - 💾 **数据持久化**: 自动将历史数据保存到 SQLite 数据库，方便后续分析。
 - 🚨 **低余额报警**: 当余额低于设定阈值时，自动发送通知。
+- 💓 **每日心跳**: 每天定时发送余额报告，确保监控正常运行。
 - 📢 **多渠道通知**: 目前支持 Telegram Bot、Webhook 和控制台输出。
 - 🐳 **Docker 支持**: 提供完整的 Docker 镜像构建和 Docker Compose 配置，支持 Docker Secrets。
 
@@ -74,8 +75,15 @@ cargo build --release
 | `UPM_PASSWORD` | `password` | 密码 |
 | `UPM_DATABASE_URL` | `database_url` | 数据库连接字符串 |
 | `UPM_INTERVAL_SECONDS` | `interval_seconds` | 轮询间隔(秒) |
+| `UPM_LOGIN_TYPE` | `login_type` | 登录方式 (password/wechat) |
+| `UPM_COOKIE_FILE` | `cookie_file` | Cookie 文件路径 |
 | `UPM_NOTIFY__ENABLED` | `notify.enabled` | 是否启用通知 (true/false) |
+| `UPM_NOTIFY__THRESHOLD` | `notify.threshold` | 余额报警阈值 (元) |
+| `UPM_NOTIFY__COOLDOWN_MINUTES` | `notify.cooldown_minutes` | 报警冷却时间 (分钟) |
+| `UPM_NOTIFY__HEARTBEAT_ENABLED` | `notify.heartbeat_enabled` | 是否启用每日心跳 (true/false) |
+| `UPM_NOTIFY__HEARTBEAT_HOUR` | `notify.heartbeat_hour` | 每日心跳时间 (0-23) |
 | `UPM_NOTIFY__NOTIFY_TYPE` | `notify.notify_type` | 通知类型 (console/webhook/telegram) |
+| `UPM_NOTIFY__WEBHOOK_URL` | `notify.webhook_url` | Webhook URL |
 | `UPM_NOTIFY__TELEGRAM_BOT_TOKEN` | `notify.telegram_bot_token` | Telegram Bot Token |
 | `UPM_NOTIFY__TELEGRAM_CHAT_ID` | `notify.telegram_chat_id` | Telegram Chat ID |
 

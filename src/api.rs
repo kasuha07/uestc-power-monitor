@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, LoginType};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 use uestc_client::UestcClient;
@@ -12,8 +12,9 @@ pub struct ApiService {
 
 impl ApiService {
     pub async fn new(config: &AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        debug!("Creating new API service for user: {}", config.username);
-        let client = UestcClient::new();
+        let user_display = config.username.as_deref().unwrap_or("unknown");
+        debug!("Creating new API service for user: {}", user_display);
+        let client = UestcClient::with_cookie_file(&config.cookie_file);
 
         let service = Self {
             client,
@@ -25,10 +26,25 @@ impl ApiService {
     }
 
     async fn login(&self) -> Result<(), Box<dyn std::error::Error>> {
-        debug!("Attempting login...");
-        self.client
-            .login(&self.config.username, &self.config.password)
-            .await?;
+        debug!("Attempting login via {:?}", self.config.login_type);
+        match self.config.login_type {
+            LoginType::Password => {
+                let username = self
+                    .config
+                    .username
+                    .as_ref()
+                    .ok_or_else(|| "Username required for password login".to_string())?;
+                let password = self
+                    .config
+                    .password
+                    .as_ref()
+                    .ok_or_else(|| "Password required for password login".to_string())?;
+                self.client.login(username, password).await?;
+            }
+            LoginType::Wechat => {
+                self.client.wechat_login().await?;
+            }
+        }
         debug!("Login successful");
 
         // Initialize session with forced CAS authentication

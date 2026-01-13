@@ -3,15 +3,12 @@ name: Build and Publish Docker Image
 on:
   push:
     branches: [ "main" ]
-    # 当推送类似 v1.0.0 的标签时也触发
     tags: [ 'v*.*.*' ]
   pull_request:
     branches: [ "main" ]
 
 env:
-  # 使用 GitHub Container Registry (ghcr.io)
   REGISTRY: ghcr.io
-  # 镜像名称默认为 github.repository (用户名/仓库名)
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
@@ -25,12 +22,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 设置 Docker Buildx (用于多架构构建支持和缓存功能)
+      # === 核心修改点：清理本地开发补丁 ===
+      - name: Cleanup local patches for CI
+        run: |
+          # 检查 Cargo.toml 中是否有 [patch.crates-io] 段落
+          # 使用 sed 删除从 [patch.crates-io] 开始到下一个 path = 所在的行
+          # 这样可以确保 CI 环境不会因为找不到本地路径而报错，而是去使用 crates.io 的版本
+          if grep -q "\[patch.crates-io\]" Cargo.toml; then
+            echo "Detected local patches, cleaning up for CI build..."
+            sed -i '/\[patch.crates-io\]/,/path =/d' Cargo.toml
+            echo "Cargo.toml cleaned:"
+            cat Cargo.toml
+          else
+            echo "No local patches found."
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 登录到 GitHub Container Registry
-      # 注意：PR 无法获取 secrets 且没有写权限，所以跳过登录
       - name: Log into registry ${{ env.REGISTRY }}
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
@@ -39,7 +48,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 提取元数据 (tags, labels) 用于 Docker
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -50,21 +58,14 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
 
-      # 构建并推送 Docker 镜像
       - name: Build and push Docker image
         id: build-and-push
-        uses: docker/build-push-action@v6  # 升级到了 v6
+        uses: docker/build-push-action@v6
         with:
           context: .
-          # PR 时只构建不推送，Push 时构建并推送
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          
-          # === 缓存配置重点 ===
-          # type=gha 是 GitHub Actions 专用缓存，速度最快
+          # 缓存配置
           cache-from: type=gha
-          # mode=max 对于 Rust 至关重要！
-          # 它会把中间层（cargo-chef 的依赖层）也缓存下来，
-          # 否则默认只缓存最终层，会导致下次构建依然要重新编译依赖。
           cache-to: type=gha,mode=max

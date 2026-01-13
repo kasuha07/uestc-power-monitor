@@ -1,6 +1,12 @@
-# UESTC 统一身份认证账号
+# UESTC 统一身份认证账号 (使用 password 登录时必须)
 username = "your_student_id"
 password = "your_password"
+
+# 登录方式: "password" (默认) 或 "wechat"
+# login_type = "password"
+
+# Cookie 保存路径 (默认为 "uestc_cookies.json")
+# cookie_file = "uestc_cookies.json"
 
 # 监控轮询间隔（秒）
 interval_seconds = 600

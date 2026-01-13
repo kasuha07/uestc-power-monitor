@@ -2,12 +2,28 @@ use config::{Config, ConfigError, Environment, File, FileFormat};
 use serde::Deserialize;
 use std::{fs, path::Path};
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LoginType {
+    #[default]
+    Password,
+    Wechat,
+}
+
+fn default_cookie_file() -> String {
+    "uestc_cookies.json".to_string()
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
-    pub username: String,
-    pub password: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
     pub service_url: Option<String>,
     pub database_url: String,
+    #[serde(default)]
+    pub login_type: LoginType,
+    #[serde(default = "default_cookie_file")]
+    pub cookie_file: String,
     #[serde(default = "default_interval")]
     pub interval_seconds: u64,
     #[serde(default)]
