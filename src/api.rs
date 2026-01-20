@@ -1,6 +1,6 @@
 use crate::config::{AppConfig, LoginType};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uestc_client::UestcClient;
 
 const BASE_URL: &str = "https://online.uestc.edu.cn/site";
@@ -116,6 +116,9 @@ impl ApiService {
         if let Some(ref data) = resp.data {
             info!("Power info received: room={}, money={:.2}, energy={:.2}",
                 data.room_display_name, data.remaining_money, data.remaining_energy);
+        } else {
+            warn!("API returned no data - error_code={}, message='{}', url='{}'. This usually means: 1) No room is bound to your account, 2) Session expired, or 3) API service issue",
+                resp.error, resp.message, url);
         }
 
         Ok(resp.data)

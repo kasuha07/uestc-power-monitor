@@ -12,7 +12,7 @@ use crate::utils::retry;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Uestc Power Monitor...");
@@ -84,7 +84,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     Ok(None) => {
-                        warn!("No data available");
+                        debug!("No data returned from API (details logged above)");
                     }
                     Err(e) => {
                         error!("Failed to fetch data: {}", e);
