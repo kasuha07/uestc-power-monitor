@@ -33,6 +33,9 @@ RUN strip target/release/uestc-power-monitor
 # Use Google Distroless CC image (includes glibc/libgcc/libm)
 FROM gcr.io/distroless/cc-debian12
 
+# Copy timezone data for TZ environment variable support
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+
 # Copy the final binary from builder stage
 COPY --from=builder /usr/src/app/target/release/uestc-power-monitor /usr/local/bin/uestc-power-monitor
 

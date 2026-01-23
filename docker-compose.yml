@@ -12,6 +12,8 @@ services:
       # Mount data directory for SQLite database persistence
       - ./data:/app/data
     environment:
+      # Timezone configuration
+      - TZ=Asia/Shanghai
       # Override database URL to use persistent volume
       - UPM_DATABASE_URL=sqlite://data/power_monitor.db
       # You can set credentials here or in config.toml
