@@ -2,6 +2,7 @@ use crate::api::PowerInfo;
 use crate::config::{NotifyConfig, NotifyType};
 use crate::utils::retry;
 use chrono::{Local, Timelike};
+use serde_json;
 use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
@@ -12,6 +13,8 @@ use tracing::{debug, error, info, warn};
 pub enum NotificationEvent {
     LowBalance,
     Heartbeat,
+    LoginFailure,
+    ConsecutiveFetchFailures,
 }
 
 pub struct NotificationManager {
@@ -20,6 +23,8 @@ pub struct NotificationManager {
     last_low_balance_notify_time: Option<chrono::DateTime<Local>>,
     last_heartbeat_date: Option<chrono::NaiveDate>,
     last_balance: Option<f64>,
+    consecutive_fetch_failures: u32,
+    last_fetch_failure_notify_time: Option<chrono::DateTime<Local>>,
 }
 
 impl NotificationManager {
@@ -31,6 +36,8 @@ impl NotificationManager {
             last_low_balance_notify_time: None,
             last_heartbeat_date: None,
             last_balance: None,
+            consecutive_fetch_failures: 0,
+            last_fetch_failure_notify_time: None,
         })
     }
 
@@ -123,12 +130,80 @@ impl NotificationManager {
             self.last_balance = Some(current_balance);
         }
     }
+
+    pub async fn notify_login_failure(&self, error_msg: &str) {
+        if !self.config.enabled || !self.config.login_failure_enabled {
+            return;
+        }
+
+        info!("Sending login failure notification...");
+        if let Err(e) = retry(
+            || self.notifier.notify_error(error_msg, NotificationEvent::LoginFailure),
+            3,
+            Duration::from_secs(2),
+        )
+        .await
+        {
+            error!("Failed to send login failure notification: {}", e);
+        } else {
+            debug!("Login failure notification sent successfully");
+        }
+    }
+
+    pub async fn record_fetch_failure(&mut self) {
+        self.consecutive_fetch_failures += 1;
+        debug!("Consecutive fetch failures: {}", self.consecutive_fetch_failures);
+
+        if !self.config.enabled || !self.config.fetch_failure_enabled {
+            return;
+        }
+
+        if self.consecutive_fetch_failures >= self.config.fetch_failure_threshold {
+            let now = Local::now();
+            let should_notify = if let Some(last_time) = self.last_fetch_failure_notify_time {
+                let elapsed = now.signed_duration_since(last_time);
+                elapsed.num_minutes() >= self.config.fetch_failure_cooldown_minutes as i64
+            } else {
+                true
+            };
+
+            if should_notify {
+                info!("Sending consecutive fetch failures notification (count: {})...", self.consecutive_fetch_failures);
+                let error_msg = format!("Failed to fetch data {} times consecutively", self.consecutive_fetch_failures);
+                if let Err(e) = retry(
+                    || self.notifier.notify_error(&error_msg, NotificationEvent::ConsecutiveFetchFailures),
+                    3,
+                    Duration::from_secs(2),
+                )
+                .await
+                {
+                    error!("Failed to send consecutive fetch failures notification: {}", e);
+                } else {
+                    self.last_fetch_failure_notify_time = Some(now);
+                    debug!("Consecutive fetch failures notification sent successfully");
+                }
+            }
+        }
+    }
+
+    pub fn reset_fetch_failures(&mut self) {
+        if self.consecutive_fetch_failures > 0 {
+            debug!("Resetting consecutive fetch failures counter (was: {})", self.consecutive_fetch_failures);
+            self.consecutive_fetch_failures = 0;
+        }
+    }
 }
 
 pub trait Notifier: Send + Sync {
     fn notify<'a>(
         &'a self,
         info: &'a PowerInfo,
+        event: NotificationEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>>;
+
+    fn notify_error<'a>(
+        &'a self,
+        error_msg: &'a str,
         event: NotificationEvent,
     ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>>;
 }
@@ -162,15 +237,39 @@ impl Notifier for ConsoleNotifier {
             match event {
                 NotificationEvent::LowBalance => {
                     warn!(
-                        "⚠️ [Low Power Warning] Room: {}, Money: {:.2} CNY, Energy: {:.2} kWh",
+                        "UESTC Power Monitor ⚠️ [Low Power Warning] Room: {}, Money: {:.2} CNY, Energy: {:.2} kWh",
                         info.room_display_name, info.remaining_money, info.remaining_energy
                     );
                 }
                 NotificationEvent::Heartbeat => {
                     info!(
-                        "ℹ️ [Daily Report] Room: {}, Money: {:.2} CNY, Energy: {:.2} kWh",
+                        "UESTC Power Monitor ℹ️ [Daily Report] Room: {}, Money: {:.2} CNY, Energy: {:.2} kWh",
                         info.room_display_name, info.remaining_money, info.remaining_energy
                     );
+                }
+                NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
+                    // These events use notify_error instead
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn notify_error<'a>(
+        &'a self,
+        error_msg: &'a str,
+        event: NotificationEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            match event {
+                NotificationEvent::LoginFailure => {
+                    error!("UESTC Power Monitor 🔐 [Login Failure] {}", error_msg);
+                }
+                NotificationEvent::ConsecutiveFetchFailures => {
+                    error!("UESTC Power Monitor ❌ [Fetch Failures] {}", error_msg);
+                }
+                NotificationEvent::LowBalance | NotificationEvent::Heartbeat => {
+                    // These events use notify instead
                 }
             }
             Ok(())
@@ -202,6 +301,9 @@ impl Notifier for WebhookNotifier {
             let event_str = match event {
                 NotificationEvent::LowBalance => "low_balance",
                 NotificationEvent::Heartbeat => "heartbeat",
+                NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
+                    return Ok(()); // These events use notify_error instead
+                }
             };
             debug!("Sending webhook notification: event={}, url={}", event_str, self.url);
             self.client
@@ -212,6 +314,40 @@ impl Notifier for WebhookNotifier {
                 .await?
                 .error_for_status()?;
             debug!("Webhook notification sent successfully");
+            Ok(())
+        })
+    }
+
+    fn notify_error<'a>(
+        &'a self,
+        error_msg: &'a str,
+        event: NotificationEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            let event_str = match event {
+                NotificationEvent::LoginFailure => "login_failure",
+                NotificationEvent::ConsecutiveFetchFailures => "consecutive_fetch_failures",
+                NotificationEvent::LowBalance | NotificationEvent::Heartbeat => {
+                    return Ok(()); // These events use notify instead
+                }
+            };
+
+            let payload = serde_json::json!({
+                "title": "UESTC Power Monitor",
+                "event": event_str,
+                "error": error_msg,
+                "timestamp": chrono::Local::now().to_rfc3339(),
+            });
+
+            debug!("Sending webhook error notification: event={}, url={}", event_str, self.url);
+            self.client
+                .post(&self.url)
+                .header("X-Event-Type", event_str)
+                .json(&payload)
+                .send()
+                .await?
+                .error_for_status()?;
+            debug!("Webhook error notification sent successfully");
             Ok(())
         })
     }
@@ -243,10 +379,13 @@ impl Notifier for TelegramNotifier {
             let title = match event {
                 NotificationEvent::LowBalance => "⚠️ [Low Power Warning]",
                 NotificationEvent::Heartbeat => "ℹ️ [Daily Report]",
+                NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
+                    return Ok(()); // These events use notify_error instead
+                }
             };
 
             let message = format!(
-                "{}\nRoom: {}\nMoney: {:.2} CNY\nEnergy: {:.2} kWh",
+                "UESTC Power Monitor\n{}\nRoom: {}\nMoney: {:.2} CNY\nEnergy: {:.2} kWh",
                 title, info.room_display_name, info.remaining_money, info.remaining_energy
             );
 
@@ -261,6 +400,37 @@ impl Notifier for TelegramNotifier {
                 .await?
                 .error_for_status()?;
             debug!("Telegram notification sent successfully");
+            Ok(())
+        })
+    }
+
+    fn notify_error<'a>(
+        &'a self,
+        error_msg: &'a str,
+        event: NotificationEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            let title = match event {
+                NotificationEvent::LoginFailure => "🔐 [Login Failure]",
+                NotificationEvent::ConsecutiveFetchFailures => "❌ [Fetch Failures]",
+                NotificationEvent::LowBalance | NotificationEvent::Heartbeat => {
+                    return Ok(()); // These events use notify instead
+                }
+            };
+
+            let message = format!("UESTC Power Monitor\n{}\n{}", title, error_msg);
+
+            let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
+            debug!("Sending Telegram error notification to chat_id: {}", self.chat_id);
+            let params = [("chat_id", &self.chat_id), ("text", &message)];
+
+            self.client
+                .post(&url)
+                .form(&params)
+                .send()
+                .await?
+                .error_for_status()?;
+            debug!("Telegram error notification sent successfully");
             Ok(())
         })
     }

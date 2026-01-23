@@ -21,6 +21,15 @@ threshold = 5.0          # 余额报警阈值（元）
 cooldown_minutes = 520    # 报警冷却时间（分钟）
 heartbeat_enabled = true  # 是否启用每日心跳通知
 heartbeat_hour = 9        # 每日心跳通知时间（0-23）
+
+# 登录失败通知
+login_failure_enabled = true  # 是否启用登录失败通知
+
+# 连续获取数据失败通知
+fetch_failure_enabled = true  # 是否启用连续获取数据失败通知
+fetch_failure_threshold = 3   # 连续失败次数阈值（默认3次）
+fetch_failure_cooldown_minutes = 60  # 失败通知冷却时间（分钟，默认60分钟）
+
 notify_type = "console"  # 通知类型: console, webhook, telegram
 
 # Webhook 配置 (仅 notify_type = "webhook" 时需要)

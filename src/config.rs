@@ -46,6 +46,14 @@ fn default_heartbeat_hour() -> u32 {
     9 // 9:00 AM
 }
 
+fn default_fetch_failure_threshold() -> u32 {
+    3 // 3 consecutive failures
+}
+
+fn default_fetch_failure_cooldown_minutes() -> u64 {
+    60 // 1 hour
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct NotifyConfig {
     #[serde(default)]
@@ -58,6 +66,14 @@ pub struct NotifyConfig {
     pub heartbeat_enabled: bool,
     #[serde(default = "default_heartbeat_hour")]
     pub heartbeat_hour: u32,
+    #[serde(default)]
+    pub login_failure_enabled: bool,
+    #[serde(default)]
+    pub fetch_failure_enabled: bool,
+    #[serde(default = "default_fetch_failure_threshold")]
+    pub fetch_failure_threshold: u32,
+    #[serde(default = "default_fetch_failure_cooldown_minutes")]
+    pub fetch_failure_cooldown_minutes: u64,
     #[serde(default)]
     pub notify_type: NotifyType,
     #[serde(default)]

@@ -28,8 +28,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     // initialize services
     debug!("Initializing API service...");
-    let api_service = retry(|| ApiService::new(&config), 3, Duration::from_secs(5)).await?;
-    debug!("API service initialized");
+    let api_service = match retry(|| ApiService::new(&config), 3, Duration::from_secs(5)).await {
+        Ok(service) => {
+            debug!("API service initialized");
+            service
+        }
+        Err(e) => {
+            error!("Failed to initialize API service (login failed): {}", e);
+            // Try to send login failure notification
+            if let Some(manager) = NotificationManager::new(config.notify.clone()) {
+                manager.notify_login_failure(&format!("Failed to login: {}", e)).await;
+            }
+            return Err(e);
+        }
+    };
 
     debug!("Initializing database service...");
     let db_service = DbService::new(config.database_url.clone()).await?;
@@ -72,6 +84,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(Some(data)) => {
                         debug!("Data fetched successfully: room={}, money={:.2}, energy={:.2}",
                             data.room_display_name, data.remaining_money, data.remaining_energy);
+
+                        // Reset consecutive failure counter on success
+                        if let Some(manager) = &mut notification_manager {
+                            manager.reset_fetch_failures();
+                        }
+
                         // save data to database
                         if let Err(e) = db_service.save_data(&data).await {
                             error!("Failed to save data: {}", e);
@@ -85,9 +103,17 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Ok(None) => {
                         debug!("No data returned from API (details logged above)");
+                        // Record as a fetch failure
+                        if let Some(manager) = &mut notification_manager {
+                            manager.record_fetch_failure().await;
+                        }
                     }
                     Err(e) => {
                         error!("Failed to fetch data: {}", e);
+                        // Record consecutive fetch failure
+                        if let Some(manager) = &mut notification_manager {
+                            manager.record_fetch_failure().await;
+                        }
                     }
                 }
 
