@@ -30,7 +30,12 @@ fetch_failure_enabled = true  # 是否启用连续获取数据失败通知
 fetch_failure_threshold = 3   # 连续失败次数阈值（默认3次）
 fetch_failure_cooldown_minutes = 60  # 失败通知冷却时间（分钟，默认60分钟）
 
-notify_type = "console"  # 通知类型: console, webhook, telegram
+# 单通道通知（向后兼容）
+notify_type = "console"  # 通知类型: console, webhook, telegram, email
+
+# 多通道通知（新功能 - 取消注释以使用）
+# notify_types = ["telegram", "email"]  # 同时发送到多个通知渠道
+# 注意：如果同时设置了 notify_type 和 notify_types，则 notify_types 优先
 
 # Webhook 配置 (仅 notify_type = "webhook" 时需要)
 webhook_url = "https://webhook.site/..."

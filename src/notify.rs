@@ -25,7 +25,7 @@ pub enum NotificationEvent {
 
 pub struct NotificationManager {
     config: NotifyConfig,
-    notifier: Box<dyn Notifier>,
+    notifiers: Vec<Box<dyn Notifier>>,
     last_low_balance_notify_time: Option<chrono::DateTime<Local>>,
     last_heartbeat_date: Option<chrono::NaiveDate>,
     last_balance: Option<f64>,
@@ -35,10 +35,28 @@ pub struct NotificationManager {
 
 impl NotificationManager {
     pub fn new(config: NotifyConfig) -> Option<Self> {
-        let notifier = create_notifier(&config)?;
+        if !config.enabled {
+            debug!("Notifications disabled");
+            return None;
+        }
+
+        let notify_types = config.get_active_notify_types();
+        let mut notifiers = Vec::new();
+
+        for notify_type in notify_types {
+            if let Some(notifier) = create_single_notifier(&config, notify_type) {
+                notifiers.push(notifier);
+            }
+        }
+
+        if notifiers.is_empty() {
+            warn!("No valid notifiers configured");
+            return None;
+        }
+
         Some(Self {
             config,
-            notifier,
+            notifiers,
             last_low_balance_notify_time: None,
             last_heartbeat_date: None,
             last_balance: None,
@@ -47,8 +65,35 @@ impl NotificationManager {
         })
     }
 
+    async fn notify_all(&self, data: &PowerInfo, event: NotificationEvent) {
+        for (idx, notifier) in self.notifiers.iter().enumerate() {
+            if let Err(e) = retry(
+                || notifier.notify(data, event),
+                3,
+                Duration::from_secs(2),
+            )
+            .await
+            {
+                error!("Notifier {} failed: {}", idx, e);
+            }
+        }
+    }
+
+    async fn notify_error_all(&self, error_msg: &str, event: NotificationEvent) {
+        for (idx, notifier) in self.notifiers.iter().enumerate() {
+            if let Err(e) = retry(
+                || notifier.notify_error(error_msg, event),
+                3,
+                Duration::from_secs(2),
+            )
+            .await
+            {
+                error!("Notifier {} failed: {}", idx, e);
+            }
+        }
+    }
+
     pub async fn check_and_notify(&mut self, data: &PowerInfo) {
-        let notifier = &self.notifier;
         let now = Local::now();
         debug!("Checking notification conditions at {}", now);
 
@@ -59,18 +104,9 @@ impl NotificationManager {
                 let today = now.date_naive();
                 if self.last_heartbeat_date != Some(today) {
                     info!("Sending daily heartbeat...");
-                    if let Err(e) = retry(
-                        || notifier.notify(data, NotificationEvent::Heartbeat),
-                        3,
-                        Duration::from_secs(2),
-                    )
-                    .await
-                    {
-                        error!("Failed to send heartbeat: {}", e);
-                    } else {
-                        self.last_heartbeat_date = Some(today);
-                        debug!("Heartbeat sent successfully");
-                    }
+                    self.notify_all(data, NotificationEvent::Heartbeat).await;
+                    self.last_heartbeat_date = Some(today);
+                    debug!("Heartbeat sent successfully");
                 } else {
                     debug!("Heartbeat already sent today");
                 }
@@ -119,18 +155,9 @@ impl NotificationManager {
 
             if should_notify {
                 debug!("Sending low balance notification...");
-                if let Err(e) = retry(
-                    || notifier.notify(data, NotificationEvent::LowBalance),
-                    3,
-                    Duration::from_secs(2),
-                )
-                .await
-                {
-                    error!("Failed to notify low balance: {}", e);
-                } else {
-                    self.last_low_balance_notify_time = Some(now);
-                    debug!("Low balance notification sent successfully");
-                }
+                self.notify_all(data, NotificationEvent::LowBalance).await;
+                self.last_low_balance_notify_time = Some(now);
+                debug!("Low balance notification sent successfully");
             }
 
             self.last_balance = Some(current_balance);
@@ -143,17 +170,8 @@ impl NotificationManager {
         }
 
         info!("Sending login failure notification...");
-        if let Err(e) = retry(
-            || self.notifier.notify_error(error_msg, NotificationEvent::LoginFailure),
-            3,
-            Duration::from_secs(2),
-        )
-        .await
-        {
-            error!("Failed to send login failure notification: {}", e);
-        } else {
-            debug!("Login failure notification sent successfully");
-        }
+        self.notify_error_all(error_msg, NotificationEvent::LoginFailure).await;
+        debug!("Login failure notification sent successfully");
     }
 
     pub async fn record_fetch_failure(&mut self) {
@@ -176,18 +194,9 @@ impl NotificationManager {
             if should_notify {
                 info!("Sending consecutive fetch failures notification (count: {})...", self.consecutive_fetch_failures);
                 let error_msg = format!("Failed to fetch data {} times consecutively", self.consecutive_fetch_failures);
-                if let Err(e) = retry(
-                    || self.notifier.notify_error(&error_msg, NotificationEvent::ConsecutiveFetchFailures),
-                    3,
-                    Duration::from_secs(2),
-                )
-                .await
-                {
-                    error!("Failed to send consecutive fetch failures notification: {}", e);
-                } else {
-                    self.last_fetch_failure_notify_time = Some(now);
-                    debug!("Consecutive fetch failures notification sent successfully");
-                }
+                self.notify_error_all(&error_msg, NotificationEvent::ConsecutiveFetchFailures).await;
+                self.last_fetch_failure_notify_time = Some(now);
+                debug!("Consecutive fetch failures notification sent successfully");
             }
         }
     }
@@ -214,30 +223,47 @@ pub trait Notifier: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>>;
 }
 
-pub fn create_notifier(config: &NotifyConfig) -> Option<Box<dyn Notifier>> {
-    if !config.enabled {
-        debug!("Notifications disabled");
-        return None;
-    }
+pub fn create_single_notifier(config: &NotifyConfig, notify_type: NotifyType) -> Option<Box<dyn Notifier>> {
+    debug!("Creating notifier of type: {:?}", notify_type);
 
-    debug!("Creating notifier of type: {:?}", config.notify_type);
-    match config.notify_type {
+    match notify_type {
         NotifyType::Console => Some(Box::new(ConsoleNotifier)),
-        NotifyType::Webhook => Some(Box::new(WebhookNotifier::new(config.webhook_url.clone()))),
-        NotifyType::Telegram => Some(Box::new(TelegramNotifier::new(
-            config.telegram_bot_token.clone(),
-            config.telegram_chat_id.clone(),
-        ))),
+        NotifyType::Webhook => {
+            if config.webhook_url.is_empty() {
+                warn!("Webhook notifier skipped: webhook_url is not configured");
+                return None;
+            }
+            Some(Box::new(WebhookNotifier::new(config.webhook_url.clone())))
+        }
+        NotifyType::Telegram => {
+            if config.telegram_bot_token.is_empty() || config.telegram_chat_id.is_empty() {
+                warn!("Telegram notifier skipped: telegram_bot_token or telegram_chat_id is not configured");
+                return None;
+            }
+            Some(Box::new(TelegramNotifier::new(
+                config.telegram_bot_token.clone(),
+                config.telegram_chat_id.clone(),
+            )))
+        }
         NotifyType::Email => {
             match EmailNotifier::new(config) {
                 Ok(notifier) => Some(Box::new(notifier)),
                 Err(e) => {
-                    error!("Failed to create email notifier: {}", e);
+                    warn!("Email notifier skipped: {}", e);
                     None
                 }
             }
         }
     }
+}
+
+// Backward compatibility wrapper
+pub fn create_notifier(config: &NotifyConfig) -> Option<Box<dyn Notifier>> {
+    if !config.enabled {
+        debug!("Notifications disabled");
+        return None;
+    }
+    create_single_notifier(config, config.notify_type.clone())
 }
 
 pub struct ConsoleNotifier;

@@ -10,7 +10,7 @@
 - 💾 **数据持久化**: 自动将历史数据保存到 SQLite 数据库，方便后续分析。
 - 🚨 **低余额报警**: 当余额低于设定阈值时，自动发送通知。
 - 💓 **每日心跳**: 每天定时发送余额报告，确保监控正常运行。
-- 📢 **多渠道通知**: 目前支持 Telegram Bot、Webhook 和控制台输出。
+- 📢 **多渠道通知**: 支持 Console、Webhook、Telegram Bot 和 Email (SMTP)，可同时启用多个通知渠道。
 - 🐳 **Docker 支持**: 提供完整的 Docker 镜像构建和 Docker Compose 配置，支持 Docker Secrets。
 
 ## 快速开始
@@ -82,10 +82,20 @@ cargo build --release
 | `UPM_NOTIFY__COOLDOWN_MINUTES` | `notify.cooldown_minutes` | 报警冷却时间 (分钟) |
 | `UPM_NOTIFY__HEARTBEAT_ENABLED` | `notify.heartbeat_enabled` | 是否启用每日心跳 (true/false) |
 | `UPM_NOTIFY__HEARTBEAT_HOUR` | `notify.heartbeat_hour` | 每日心跳时间 (0-23) |
-| `UPM_NOTIFY__NOTIFY_TYPE` | `notify.notify_type` | 通知类型 (console/webhook/telegram) |
+| `UPM_NOTIFY__LOGIN_FAILURE_ENABLED` | `notify.login_failure_enabled` | 是否启用登录失败通知 (true/false) |
+| `UPM_NOTIFY__FETCH_FAILURE_ENABLED` | `notify.fetch_failure_enabled` | 是否启用获取失败通知 (true/false) |
+| `UPM_NOTIFY__NOTIFY_TYPE` | `notify.notify_type` | 单通道通知类型 (console/webhook/telegram/email) |
+| `UPM_NOTIFY__NOTIFY_TYPES` | `notify.notify_types` | 多通道通知类型 (逗号分隔，如 "telegram,email") |
 | `UPM_NOTIFY__WEBHOOK_URL` | `notify.webhook_url` | Webhook URL |
 | `UPM_NOTIFY__TELEGRAM_BOT_TOKEN` | `notify.telegram_bot_token` | Telegram Bot Token |
 | `UPM_NOTIFY__TELEGRAM_CHAT_ID` | `notify.telegram_chat_id` | Telegram Chat ID |
+| `UPM_NOTIFY__SMTP_SERVER` | `notify.smtp_server` | SMTP 服务器地址 |
+| `UPM_NOTIFY__SMTP_PORT` | `notify.smtp_port` | SMTP 端口 |
+| `UPM_NOTIFY__SMTP_USERNAME` | `notify.smtp_username` | SMTP 用户名 |
+| `UPM_NOTIFY__SMTP_PASSWORD` | `notify.smtp_password` | SMTP 密码 |
+| `UPM_NOTIFY__SMTP_FROM` | `notify.smtp_from` | 发件人地址 |
+| `UPM_NOTIFY__SMTP_TO` | `notify.smtp_to` | 收件人地址 (逗号分隔) |
+| `UPM_NOTIFY__SMTP_ENCRYPTION` | `notify.smtp_encryption` | SMTP 加密方式 (starttls/tls/none) |
 
 ### 3. Docker Secrets
 
@@ -95,6 +105,47 @@ cargo build --release
 - `password`: `/run/secrets/password`
 - `service_url`: `/run/secrets/service_url`
 - `database_url`: `/run/secrets/database_url`
+
+## 通知渠道配置
+
+### 单通道通知（向后兼容）
+
+使用 `notify_type` 配置单个通知渠道：
+
+```toml
+[notify]
+enabled = true
+notify_type = "telegram"  # 可选: console, webhook, telegram, email
+```
+
+### 多通道通知（新功能）
+
+使用 `notify_types` 同时启用多个通知渠道：
+
+```toml
+[notify]
+enabled = true
+notify_types = ["telegram", "email"]  # 同时发送到 Telegram 和 Email
+```
+
+**通过环境变量配置多通道：**
+
+```bash
+UPM_NOTIFY__NOTIFY_TYPES="telegram,email"
+```
+
+**注意事项：**
+- 如果同时设置了 `notify_type` 和 `notify_types`，则 `notify_types` 优先
+- 每个通知渠道独立运行，一个渠道失败不影响其他渠道
+- 缺少必要配置的渠道会被自动跳过（如 Telegram 缺少 bot_token）
+- 所有渠道都会收到相同的通知内容
+
+### 通知渠道说明
+
+1. **Console**: 输出到控制台日志，无需额外配置
+2. **Webhook**: 发送 JSON 数据到指定 URL，需配置 `webhook_url`
+3. **Telegram**: 通过 Telegram Bot 发送消息，需配置 `telegram_bot_token` 和 `telegram_chat_id`
+4. **Email**: 通过 SMTP 发送邮件，需配置完整的 SMTP 参数（服务器、端口、认证信息等）
 
 ## 数据表结构
 

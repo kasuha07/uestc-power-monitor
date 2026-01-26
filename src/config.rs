@@ -92,7 +92,9 @@ pub struct NotifyConfig {
     #[serde(default = "default_fetch_failure_cooldown_minutes")]
     pub fetch_failure_cooldown_minutes: u64,
     #[serde(default)]
-    pub notify_type: NotifyType,
+    pub notify_type: NotifyType,  // Keep for backward compatibility
+    #[serde(default)]
+    pub notify_types: Vec<NotifyType>,  // New: support multiple channels
     #[serde(default)]
     pub webhook_url: String,
     #[serde(default)]
@@ -124,6 +126,16 @@ pub enum NotifyType {
     Webhook,
     Telegram,
     Email,
+}
+
+impl NotifyConfig {
+    pub fn get_active_notify_types(&self) -> Vec<NotifyType> {
+        if !self.notify_types.is_empty() {
+            self.notify_types.clone()
+        } else {
+            vec![self.notify_type.clone()]
+        }
+    }
 }
 
 impl AppConfig {
