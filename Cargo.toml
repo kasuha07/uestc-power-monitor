@@ -15,6 +15,7 @@ reqwest = { version = "0.12", features = ["json"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 openssl = { version = "0.10", features = ["vendored"] }
+lettre = { version = "0.11", features = ["tokio1-native-tls", "builder", "smtp-transport"] }
 
 [patch.crates-io]
 uestc-client = {path = "../uestc-client"}

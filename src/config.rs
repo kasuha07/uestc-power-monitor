@@ -54,6 +54,23 @@ fn default_fetch_failure_cooldown_minutes() -> u64 {
     60 // 1 hour
 }
 
+fn default_smtp_port() -> u16 {
+    587 // Default to STARTTLS port
+}
+
+fn default_smtp_encryption() -> SmtpEncryption {
+    SmtpEncryption::Starttls
+}
+
+#[derive(Debug, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpEncryption {
+    #[default]
+    Starttls,  // Port 587, STARTTLS
+    Tls,       // Port 465, direct TLS
+    None,      // No encryption (for testing/internal servers)
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct NotifyConfig {
     #[serde(default)]
@@ -82,6 +99,21 @@ pub struct NotifyConfig {
     pub telegram_bot_token: String,
     #[serde(default)]
     pub telegram_chat_id: String,
+    // Email/SMTP configuration
+    #[serde(default)]
+    pub smtp_server: String,
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
+    #[serde(default)]
+    pub smtp_username: String,
+    #[serde(default)]
+    pub smtp_password: String,
+    #[serde(default)]
+    pub smtp_from: String,
+    #[serde(default)]
+    pub smtp_to: String,  // Comma-separated list of recipients
+    #[serde(default = "default_smtp_encryption")]
+    pub smtp_encryption: SmtpEncryption,
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -91,6 +123,7 @@ pub enum NotifyType {
     Console,
     Webhook,
     Telegram,
+    Email,
 }
 
 impl AppConfig {

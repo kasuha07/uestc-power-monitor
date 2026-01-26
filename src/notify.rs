@@ -2,6 +2,12 @@ use crate::api::PowerInfo;
 use crate::config::{NotifyConfig, NotifyType};
 use crate::utils::retry;
 use chrono::{Local, Timelike};
+use lettre::{
+    message::{header::ContentType, Message},
+    transport::smtp::authentication::Credentials,
+    AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
+};
+use lettre::transport::smtp::client::{Tls, TlsParameters};
 use serde_json;
 use std::error::Error;
 use std::future::Future;
@@ -222,6 +228,15 @@ pub fn create_notifier(config: &NotifyConfig) -> Option<Box<dyn Notifier>> {
             config.telegram_bot_token.clone(),
             config.telegram_chat_id.clone(),
         ))),
+        NotifyType::Email => {
+            match EmailNotifier::new(config) {
+                Ok(notifier) => Some(Box::new(notifier)),
+                Err(e) => {
+                    error!("Failed to create email notifier: {}", e);
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -431,6 +446,194 @@ impl Notifier for TelegramNotifier {
                 .await?
                 .error_for_status()?;
             debug!("Telegram error notification sent successfully");
+            Ok(())
+        })
+    }
+}
+
+pub struct EmailNotifier {
+    transport: AsyncSmtpTransport<Tokio1Executor>,
+    from: String,
+    to: Vec<String>,
+}
+
+impl EmailNotifier {
+    pub fn new(config: &NotifyConfig) -> Result<Self, Box<dyn Error>> {
+        // Parse recipients (comma-separated)
+        let to: Vec<String> = config.smtp_to
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if to.is_empty() {
+            return Err("No email recipients configured".into());
+        }
+
+        // Build SMTP transport based on encryption type
+        let transport = match config.smtp_encryption {
+            crate::config::SmtpEncryption::Starttls => {
+                AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_server)?
+                    .port(config.smtp_port)
+                    .credentials(Credentials::new(
+                        config.smtp_username.clone(),
+                        config.smtp_password.clone(),
+                    ))
+                    .build()
+            }
+            crate::config::SmtpEncryption::Tls => {
+                let tls = TlsParameters::new(config.smtp_server.clone())?;
+                AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_server)?
+                    .port(config.smtp_port)
+                    .tls(Tls::Wrapper(tls))
+                    .credentials(Credentials::new(
+                        config.smtp_username.clone(),
+                        config.smtp_password.clone(),
+                    ))
+                    .build()
+            }
+            crate::config::SmtpEncryption::None => {
+                AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.smtp_server)
+                    .port(config.smtp_port)
+                    .credentials(Credentials::new(
+                        config.smtp_username.clone(),
+                        config.smtp_password.clone(),
+                    ))
+                    .build()
+            }
+        };
+
+        Ok(Self {
+            transport,
+            from: config.smtp_from.clone(),
+            to,
+        })
+    }
+
+    async fn send_email(&self, subject: &str, body: &str) -> Result<(), Box<dyn Error>> {
+        for recipient in &self.to {
+            let email = Message::builder()
+                .from(self.from.parse()?)
+                .to(recipient.parse()?)
+                .subject(subject)
+                .header(ContentType::TEXT_PLAIN)
+                .body(body.to_string())?;
+
+            debug!("Sending email to: {}", recipient);
+            self.transport.send(email).await?;
+        }
+        Ok(())
+    }
+}
+
+impl Notifier for EmailNotifier {
+    fn notify<'a>(
+        &'a self,
+        info: &'a PowerInfo,
+        event: NotificationEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            let (subject, body) = match event {
+                NotificationEvent::LowBalance => {
+                    let subject = "⚠️ UESTC Power Monitor - Low Balance Warning";
+                    let body = format!(
+                        "UESTC Power Monitor - Low Balance Warning\n\
+                        \n\
+                        Room: {}\n\
+                        Remaining Money: {:.2} CNY\n\
+                        Remaining Energy: {:.2} kWh\n\
+                        \n\
+                        Please recharge your power account soon.\n\
+                        \n\
+                        Time: {}",
+                        info.room_display_name,
+                        info.remaining_money,
+                        info.remaining_energy,
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                    );
+                    (subject, body)
+                }
+                NotificationEvent::Heartbeat => {
+                    let subject = "ℹ️ UESTC Power Monitor - Daily Report";
+                    let body = format!(
+                        "UESTC Power Monitor - Daily Report\n\
+                        \n\
+                        Room: {}\n\
+                        Remaining Money: {:.2} CNY\n\
+                        Remaining Energy: {:.2} kWh\n\
+                        \n\
+                        System is running normally.\n\
+                        \n\
+                        Time: {}",
+                        info.room_display_name,
+                        info.remaining_money,
+                        info.remaining_energy,
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                    );
+                    (subject, body)
+                }
+                NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
+                    return Ok(()); // These events use notify_error instead
+                }
+            };
+
+            debug!("Sending email notification: subject={}", subject);
+            self.send_email(subject, &body).await?;
+            debug!("Email notification sent successfully");
+            Ok(())
+        })
+    }
+
+    fn notify_error<'a>(
+        &'a self,
+        error_msg: &'a str,
+        event: NotificationEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            let (subject, body) = match event {
+                NotificationEvent::LoginFailure => {
+                    let subject = "🔐 UESTC Power Monitor - Login Failure";
+                    let body = format!(
+                        "UESTC Power Monitor - Login Failure\n\
+                        \n\
+                        Failed to login to the power monitoring service.\n\
+                        \n\
+                        Error: {}\n\
+                        \n\
+                        Please check your credentials and try again.\n\
+                        \n\
+                        Time: {}",
+                        error_msg,
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                    );
+                    (subject, body)
+                }
+                NotificationEvent::ConsecutiveFetchFailures => {
+                    let subject = "❌ UESTC Power Monitor - Fetch Failures";
+                    let body = format!(
+                        "UESTC Power Monitor - Consecutive Fetch Failures\n\
+                        \n\
+                        {}\n\
+                        \n\
+                        The system is unable to fetch power data. This may indicate:\n\
+                        - Network connectivity issues\n\
+                        - Service unavailability\n\
+                        - Authentication problems\n\
+                        \n\
+                        Time: {}",
+                        error_msg,
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                    );
+                    (subject, body)
+                }
+                NotificationEvent::LowBalance | NotificationEvent::Heartbeat => {
+                    return Ok(()); // These events use notify instead
+                }
+            };
+
+            debug!("Sending email error notification: subject={}", subject);
+            self.send_email(subject, &body).await?;
+            debug!("Email error notification sent successfully");
             Ok(())
         })
     }
