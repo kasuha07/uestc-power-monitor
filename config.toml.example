@@ -31,10 +31,10 @@ fetch_failure_threshold = 3   # 连续失败次数阈值（默认3次）
 fetch_failure_cooldown_minutes = 60  # 失败通知冷却时间（分钟，默认60分钟）
 
 # 单通道通知（向后兼容）
-notify_type = "console"  # 通知类型: console, webhook, telegram, email
+notify_type = "console"  # 通知类型: console, webhook, telegram, pushover, ntfy, email
 
 # 多通道通知（新功能 - 取消注释以使用）
-# notify_types = ["telegram", "email"]  # 同时发送到多个通知渠道
+# notify_types = ["telegram", "ntfy", "pushover"]  # 同时发送到多个通知渠道
 # 注意：如果同时设置了 notify_type 和 notify_types，则 notify_types 优先
 
 # Webhook 配置 (仅 notify_type = "webhook" 时需要)
@@ -43,6 +43,23 @@ webhook_url = "https://webhook.site/..."
 # Telegram 配置 (仅 notify_type = "telegram" 时需要)
 telegram_bot_token = "your_bot_token"
 telegram_chat_id = "your_chat_id"
+
+# Pushover 配置 (仅 notify_type = "pushover" 时需要)
+pushover_api_token = "your_pushover_app_token"
+pushover_user_key = "your_pushover_user_key"
+pushover_priority = 0                    # 优先级: -2(最低) 到 2(紧急)
+pushover_retry = 60                      # priority=2(紧急) 时重试间隔秒数，最小 30
+pushover_expire = 3600                   # priority=2(紧急) 时重试总时长秒数，范围 30-10800
+pushover_url = "https://example.com"     # 点击通知跳转链接（可选）
+
+# ntfy 配置 (仅 notify_type = "ntfy" 时需要)
+ntfy_topic_url = "https://ntfy.sh/your-topic"  # 完整 topic 发布 URL（必须 https，且主机不能是/不能解析到 localhost 或内网 IP）
+ntfy_priority = 3                               # 优先级: 1(最低) 到 5(最高)
+ntfy_tags = ["warning", "zap"]                 # 标签 / emoji（可选）
+ntfy_click_action = "https://example.com"      # 点击通知跳转链接（可选）
+ntfy_icon = "https://example.com/icon.png"     # 图标 URL（可选）
+ntfy_actions = []                               # 操作按钮列表（可选，字典数组）
+ntfy_use_markdown = true                        # 是否启用 Markdown（默认 true）
 
 # Email/SMTP 配置 (仅 notify_type = "email" 时需要)
 smtp_server = "smtp.gmail.com"           # SMTP 服务器地址

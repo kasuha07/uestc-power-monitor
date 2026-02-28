@@ -11,9 +11,11 @@ pub async fn retry<F, Fut, T, E>(
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
-    E: std::fmt::Display,
 {
-    debug!("Starting retry operation with max_retries={}, initial_delay={:?}", max_retries, initial_delay);
+    debug!(
+        "Starting retry operation with max_retries={}, initial_delay={:?}",
+        max_retries, initial_delay
+    );
     let mut delay = initial_delay;
     for i in 0..max_retries {
         debug!("Retry attempt {}/{}", i + 1, max_retries);
@@ -28,10 +30,9 @@ where
                     return Err(e);
                 }
                 warn!(
-                    "Operation failed (attempt {}/{}): {}. Retrying in {:?}...",
+                    "Operation failed (attempt {}/{}): request error (details redacted). Retrying in {:?}...",
                     i + 1,
                     max_retries,
-                    e,
                     delay
                 );
                 sleep(delay).await;

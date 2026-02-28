@@ -54,6 +54,26 @@ fn default_fetch_failure_cooldown_minutes() -> u64 {
     60 // 1 hour
 }
 
+fn default_pushover_priority() -> i8 {
+    0
+}
+
+fn default_pushover_retry() -> u32 {
+    60
+}
+
+fn default_pushover_expire() -> u32 {
+    3600
+}
+
+fn default_ntfy_priority() -> u8 {
+    3
+}
+
+fn default_ntfy_use_markdown() -> bool {
+    true
+}
+
 fn default_smtp_port() -> u16 {
     587 // Default to STARTTLS port
 }
@@ -66,9 +86,9 @@ fn default_smtp_encryption() -> SmtpEncryption {
 #[serde(rename_all = "lowercase")]
 pub enum SmtpEncryption {
     #[default]
-    Starttls,  // Port 587, STARTTLS
-    Tls,       // Port 465, direct TLS
-    None,      // No encryption (for testing/internal servers)
+    Starttls, // Port 587, STARTTLS
+    Tls,  // Port 465, direct TLS
+    None, // No encryption (for testing/internal servers)
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -92,15 +112,43 @@ pub struct NotifyConfig {
     #[serde(default = "default_fetch_failure_cooldown_minutes")]
     pub fetch_failure_cooldown_minutes: u64,
     #[serde(default)]
-    pub notify_type: NotifyType,  // Keep for backward compatibility
+    pub notify_type: NotifyType, // Keep for backward compatibility
     #[serde(default)]
-    pub notify_types: Vec<NotifyType>,  // New: support multiple channels
+    pub notify_types: Vec<NotifyType>, // New: support multiple channels
     #[serde(default)]
     pub webhook_url: String,
     #[serde(default)]
     pub telegram_bot_token: String,
     #[serde(default)]
     pub telegram_chat_id: String,
+    // Pushover configuration
+    #[serde(default)]
+    pub pushover_api_token: String,
+    #[serde(default)]
+    pub pushover_user_key: String,
+    #[serde(default = "default_pushover_priority")]
+    pub pushover_priority: i8,
+    #[serde(default = "default_pushover_retry")]
+    pub pushover_retry: u32,
+    #[serde(default = "default_pushover_expire")]
+    pub pushover_expire: u32,
+    #[serde(default)]
+    pub pushover_url: String,
+    // ntfy configuration
+    #[serde(default)]
+    pub ntfy_topic_url: String,
+    #[serde(default = "default_ntfy_priority")]
+    pub ntfy_priority: u8,
+    #[serde(default)]
+    pub ntfy_tags: Vec<String>,
+    #[serde(default)]
+    pub ntfy_click_action: String,
+    #[serde(default)]
+    pub ntfy_icon: String,
+    #[serde(default)]
+    pub ntfy_actions: Vec<serde_json::Value>,
+    #[serde(default = "default_ntfy_use_markdown")]
+    pub ntfy_use_markdown: bool,
     // Email/SMTP configuration
     #[serde(default)]
     pub smtp_server: String,
@@ -113,7 +161,7 @@ pub struct NotifyConfig {
     #[serde(default)]
     pub smtp_from: String,
     #[serde(default)]
-    pub smtp_to: String,  // Comma-separated list of recipients
+    pub smtp_to: String, // Comma-separated list of recipients
     #[serde(default = "default_smtp_encryption")]
     pub smtp_encryption: SmtpEncryption,
 }
@@ -125,6 +173,8 @@ pub enum NotifyType {
     Console,
     Webhook,
     Telegram,
+    Pushover,
+    Ntfy,
     Email,
 }
 

@@ -5,3 +5,5 @@ uestc_cookies.json
 *.db-shm
 *.db-wal
 /data
+.omx/
+.omc/

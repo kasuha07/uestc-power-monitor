@@ -43,8 +43,12 @@ impl DbService {
         info!("Initializing DB...");
 
         // Enable WAL mode for better performance
-        sqlx::query("PRAGMA journal_mode=WAL").execute(&self.pool).await?;
-        sqlx::query("PRAGMA synchronous=NORMAL").execute(&self.pool).await?;
+        sqlx::query("PRAGMA journal_mode=WAL")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("PRAGMA synchronous=NORMAL")
+            .execute(&self.pool)
+            .await?;
 
         debug!("Creating power_records table if not exists...");
 
@@ -72,8 +76,10 @@ impl DbService {
     }
 
     pub async fn save_data(&self, data: &PowerInfo) -> Result<(), Box<dyn std::error::Error>> {
-        debug!("Saving data to database: room={}, money={:.2}, energy={:.2}",
-            data.room_display_name, data.remaining_money, data.remaining_energy);
+        debug!(
+            "Saving data to database: room={}, money={:.2}, energy={:.2}",
+            data.room_display_name, data.remaining_money, data.remaining_energy
+        );
 
         sqlx::query(
             r#"

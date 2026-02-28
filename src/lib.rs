@@ -37,7 +37,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             error!("Failed to initialize API service (login failed): {}", e);
             // Try to send login failure notification
             if let Some(manager) = NotificationManager::new(config.notify.clone()) {
-                manager.notify_login_failure(&format!("Failed to login: {}", e)).await;
+                manager
+                    .notify_login_failure(&format!("Failed to login: {}", e))
+                    .await;
             }
             return Err(e);
         }
@@ -50,10 +52,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     debug!("Initializing notification manager...");
     let mut notification_manager = NotificationManager::new(config.notify.clone());
-    debug!("Notification manager initialized: {:?}", notification_manager.is_some());
+    debug!(
+        "Notification manager initialized: {:?}",
+        notification_manager.is_some()
+    );
 
     let interval = Duration::from_secs(config.interval_seconds);
-    debug!("Monitoring interval set to {} seconds", config.interval_seconds);
+    debug!(
+        "Monitoring interval set to {} seconds",
+        config.interval_seconds
+    );
 
     // main loop
     loop {

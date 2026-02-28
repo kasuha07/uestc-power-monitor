@@ -2,15 +2,18 @@ use crate::api::PowerInfo;
 use crate::config::{NotifyConfig, NotifyType};
 use crate::utils::retry;
 use chrono::{Local, Timelike};
-use lettre::{
-    message::{header::ContentType, Message},
-    transport::smtp::authentication::Credentials,
-    AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
-};
 use lettre::transport::smtp::client::{Tls, TlsParameters};
+use lettre::{
+    AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
+    message::{Message, header::ContentType},
+    transport::smtp::authentication::Credentials,
+};
 use serde_json;
+use std::collections::HashMap;
 use std::error::Error;
 use std::future::Future;
+use std::net::IpAddr;
+use std::net::ToSocketAddrs;
 use std::pin::Pin;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -67,28 +70,26 @@ impl NotificationManager {
 
     async fn notify_all(&self, data: &PowerInfo, event: NotificationEvent) {
         for (idx, notifier) in self.notifiers.iter().enumerate() {
-            if let Err(e) = retry(
-                || notifier.notify(data, event),
-                3,
-                Duration::from_secs(2),
-            )
-            .await
+            if retry(|| notifier.notify(data, event), 3, Duration::from_secs(2))
+                .await
+                .is_err()
             {
-                error!("Notifier {} failed: {}", idx, e);
+                error!("Notifier {} failed: request error (details redacted)", idx);
             }
         }
     }
 
     async fn notify_error_all(&self, error_msg: &str, event: NotificationEvent) {
         for (idx, notifier) in self.notifiers.iter().enumerate() {
-            if let Err(e) = retry(
+            if retry(
                 || notifier.notify_error(error_msg, event),
                 3,
                 Duration::from_secs(2),
             )
             .await
+            .is_err()
             {
-                error!("Notifier {} failed: {}", idx, e);
+                error!("Notifier {} failed: request error (details redacted)", idx);
             }
         }
     }
@@ -111,7 +112,11 @@ impl NotificationManager {
                     debug!("Heartbeat already sent today");
                 }
             } else {
-                debug!("Not heartbeat hour yet (current: {}, target: {})", now.hour(), self.config.heartbeat_hour);
+                debug!(
+                    "Not heartbeat hour yet (current: {}, target: {})",
+                    now.hour(),
+                    self.config.heartbeat_hour
+                );
             }
         }
 
@@ -120,8 +125,10 @@ impl NotificationManager {
             let current_balance = data.remaining_money;
             let threshold = self.config.threshold;
             let is_low = current_balance <= threshold;
-            debug!("Balance check: current={:.2}, threshold={:.2}, is_low={}",
-                current_balance, threshold, is_low);
+            debug!(
+                "Balance check: current={:.2}, threshold={:.2}, is_low={}",
+                current_balance, threshold, is_low
+            );
 
             let should_notify = if is_low {
                 if let Some(last_b) = self.last_balance {
@@ -133,9 +140,14 @@ impl NotificationManager {
                         // Already low, check cooldown
                         if let Some(last_time) = self.last_low_balance_notify_time {
                             let elapsed = now.signed_duration_since(last_time);
-                            let should = elapsed.num_minutes() >= self.config.cooldown_minutes as i64;
-                            debug!("Balance still low, cooldown check: elapsed={}min, cooldown={}min, should_notify={}",
-                                elapsed.num_minutes(), self.config.cooldown_minutes, should);
+                            let should =
+                                elapsed.num_minutes() >= self.config.cooldown_minutes as i64;
+                            debug!(
+                                "Balance still low, cooldown check: elapsed={}min, cooldown={}min, should_notify={}",
+                                elapsed.num_minutes(),
+                                self.config.cooldown_minutes,
+                                should
+                            );
                             should
                         } else {
                             // Should not happen if logic is correct, but safe fallback
@@ -170,13 +182,17 @@ impl NotificationManager {
         }
 
         info!("Sending login failure notification...");
-        self.notify_error_all(error_msg, NotificationEvent::LoginFailure).await;
+        self.notify_error_all(error_msg, NotificationEvent::LoginFailure)
+            .await;
         debug!("Login failure notification sent successfully");
     }
 
     pub async fn record_fetch_failure(&mut self) {
         self.consecutive_fetch_failures += 1;
-        debug!("Consecutive fetch failures: {}", self.consecutive_fetch_failures);
+        debug!(
+            "Consecutive fetch failures: {}",
+            self.consecutive_fetch_failures
+        );
 
         if !self.config.enabled || !self.config.fetch_failure_enabled {
             return;
@@ -192,9 +208,16 @@ impl NotificationManager {
             };
 
             if should_notify {
-                info!("Sending consecutive fetch failures notification (count: {})...", self.consecutive_fetch_failures);
-                let error_msg = format!("Failed to fetch data {} times consecutively", self.consecutive_fetch_failures);
-                self.notify_error_all(&error_msg, NotificationEvent::ConsecutiveFetchFailures).await;
+                info!(
+                    "Sending consecutive fetch failures notification (count: {})...",
+                    self.consecutive_fetch_failures
+                );
+                let error_msg = format!(
+                    "Failed to fetch data {} times consecutively",
+                    self.consecutive_fetch_failures
+                );
+                self.notify_error_all(&error_msg, NotificationEvent::ConsecutiveFetchFailures)
+                    .await;
                 self.last_fetch_failure_notify_time = Some(now);
                 debug!("Consecutive fetch failures notification sent successfully");
             }
@@ -203,7 +226,10 @@ impl NotificationManager {
 
     pub fn reset_fetch_failures(&mut self) {
         if self.consecutive_fetch_failures > 0 {
-            debug!("Resetting consecutive fetch failures counter (was: {})", self.consecutive_fetch_failures);
+            debug!(
+                "Resetting consecutive fetch failures counter (was: {})",
+                self.consecutive_fetch_failures
+            );
             self.consecutive_fetch_failures = 0;
         }
     }
@@ -223,7 +249,10 @@ pub trait Notifier: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>>;
 }
 
-pub fn create_single_notifier(config: &NotifyConfig, notify_type: NotifyType) -> Option<Box<dyn Notifier>> {
+pub fn create_single_notifier(
+    config: &NotifyConfig,
+    notify_type: NotifyType,
+) -> Option<Box<dyn Notifier>> {
     debug!("Creating notifier of type: {:?}", notify_type);
 
     match notify_type {
@@ -237,7 +266,9 @@ pub fn create_single_notifier(config: &NotifyConfig, notify_type: NotifyType) ->
         }
         NotifyType::Telegram => {
             if config.telegram_bot_token.is_empty() || config.telegram_chat_id.is_empty() {
-                warn!("Telegram notifier skipped: telegram_bot_token or telegram_chat_id is not configured");
+                warn!(
+                    "Telegram notifier skipped: telegram_bot_token or telegram_chat_id is not configured"
+                );
                 return None;
             }
             Some(Box::new(TelegramNotifier::new(
@@ -245,15 +276,70 @@ pub fn create_single_notifier(config: &NotifyConfig, notify_type: NotifyType) ->
                 config.telegram_chat_id.clone(),
             )))
         }
-        NotifyType::Email => {
-            match EmailNotifier::new(config) {
-                Ok(notifier) => Some(Box::new(notifier)),
-                Err(e) => {
-                    warn!("Email notifier skipped: {}", e);
-                    None
+        NotifyType::Pushover => {
+            if config.pushover_api_token.is_empty() || config.pushover_user_key.is_empty() {
+                warn!(
+                    "Pushover notifier skipped: pushover_api_token or pushover_user_key is not configured"
+                );
+                return None;
+            }
+            Some(Box::new(PushoverNotifier::new(
+                config.pushover_api_token.clone(),
+                config.pushover_user_key.clone(),
+                config.pushover_priority,
+                config.pushover_retry,
+                config.pushover_expire,
+                optional_string(&config.pushover_url),
+            )))
+        }
+        NotifyType::Ntfy => {
+            if config.ntfy_topic_url.is_empty() {
+                warn!("ntfy notifier skipped: ntfy_topic_url is not configured");
+                return None;
+            }
+
+            let topic_url = match reqwest::Url::parse(&config.ntfy_topic_url) {
+                Ok(url) => url,
+                Err(_) => {
+                    warn!("ntfy notifier skipped: ntfy_topic_url is not a valid URL");
+                    return None;
+                }
+            };
+
+            if topic_url.scheme() != "https" {
+                warn!("ntfy notifier skipped: ntfy_topic_url must use https");
+                return None;
+            }
+
+            if topic_url.host_str().is_none() {
+                warn!("ntfy notifier skipped: ntfy_topic_url must include a host");
+                return None;
+            }
+
+            if let Some(host) = topic_url.host_str() {
+                if is_disallowed_ntfy_host(host) || host_resolves_to_disallowed_ip(host) {
+                    warn!("ntfy notifier skipped: ntfy_topic_url host is not allowed");
+                    return None;
                 }
             }
+
+            Some(Box::new(NtfyNotifier::new(
+                topic_url.to_string(),
+                config.ntfy_priority,
+                config.ntfy_tags.clone(),
+                optional_string(&config.ntfy_click_action),
+                optional_string(&config.ntfy_icon),
+                config.ntfy_actions.clone(),
+                config.ntfy_use_markdown,
+            )))
         }
+        NotifyType::Email => match EmailNotifier::new(config) {
+            Ok(notifier) => Some(Box::new(notifier)),
+            Err(e) => {
+                warn!("Email notifier skipped: {}", e);
+                None
+            }
+        },
     }
 }
 
@@ -264,6 +350,68 @@ pub fn create_notifier(config: &NotifyConfig) -> Option<Box<dyn Notifier>> {
         return None;
     }
     create_single_notifier(config, config.notify_type.clone())
+}
+
+fn optional_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn is_disallowed_ntfy_host(host: &str) -> bool {
+    let host_lower = host.to_ascii_lowercase();
+    if host_lower == "localhost" || host_lower.ends_with(".local") {
+        return true;
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        match ip {
+            IpAddr::V4(ipv4) => {
+                ipv4.is_private()
+                    || ipv4.is_loopback()
+                    || ipv4.is_link_local()
+                    || ipv4.is_multicast()
+                    || ipv4.is_unspecified()
+                    || ipv4.is_broadcast()
+            }
+            IpAddr::V6(ipv6) => {
+                ipv6.is_loopback()
+                    || ipv6.is_unique_local()
+                    || ipv6.is_unicast_link_local()
+                    || ipv6.is_multicast()
+                    || ipv6.is_unspecified()
+            }
+        }
+    } else {
+        false
+    }
+}
+
+fn host_resolves_to_disallowed_ip(host: &str) -> bool {
+    let addr = format!("{}:443", host);
+    match addr.to_socket_addrs() {
+        Ok(mut addrs) => {
+            let mut saw_any = false;
+            for socket_addr in addrs.by_ref() {
+                saw_any = true;
+                if is_disallowed_ntfy_host(&socket_addr.ip().to_string()) {
+                    return true;
+                }
+            }
+            !saw_any
+        }
+        Err(_) => true,
+    }
+}
+
+fn create_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("failed to build reqwest client with timeout")
 }
 
 pub struct ConsoleNotifier;
@@ -326,7 +474,7 @@ pub struct WebhookNotifier {
 impl WebhookNotifier {
     pub fn new(url: String) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: create_http_client(),
             url,
         }
     }
@@ -346,7 +494,7 @@ impl Notifier for WebhookNotifier {
                     return Ok(()); // These events use notify_error instead
                 }
             };
-            debug!("Sending webhook notification: event={}, url={}", event_str, self.url);
+            debug!("Sending webhook notification: event={}", event_str);
             self.client
                 .post(&self.url)
                 .header("X-Event-Type", event_str)
@@ -380,7 +528,7 @@ impl Notifier for WebhookNotifier {
                 "timestamp": chrono::Local::now().to_rfc3339(),
             });
 
-            debug!("Sending webhook error notification: event={}, url={}", event_str, self.url);
+            debug!("Sending webhook error notification: event={}", event_str);
             self.client
                 .post(&self.url)
                 .header("X-Event-Type", event_str)
@@ -403,7 +551,7 @@ pub struct TelegramNotifier {
 impl TelegramNotifier {
     pub fn new(bot_token: String, chat_id: String) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: create_http_client(),
             bot_token,
             chat_id,
         }
@@ -431,7 +579,7 @@ impl Notifier for TelegramNotifier {
             );
 
             let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
-            debug!("Sending Telegram notification to chat_id: {}", self.chat_id);
+            debug!("Sending Telegram notification");
             let params = [("chat_id", &self.chat_id), ("text", &message)];
 
             self.client
@@ -462,7 +610,7 @@ impl Notifier for TelegramNotifier {
             let message = format!("UESTC Power Monitor\n{}\n{}", title, error_msg);
 
             let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
-            debug!("Sending Telegram error notification to chat_id: {}", self.chat_id);
+            debug!("Sending Telegram error notification");
             let params = [("chat_id", &self.chat_id), ("text", &message)];
 
             self.client
@@ -477,6 +625,351 @@ impl Notifier for TelegramNotifier {
     }
 }
 
+fn build_power_notification(
+    info: &PowerInfo,
+    event: NotificationEvent,
+) -> Option<(String, String)> {
+    match event {
+        NotificationEvent::LowBalance => Some((
+            "⚠️ UESTC Power Monitor - Low Balance Warning".to_string(),
+            format!(
+                "Room: {}\nMoney: {:.2} CNY\nEnergy: {:.2} kWh\nTime: {}",
+                info.room_display_name,
+                info.remaining_money,
+                info.remaining_energy,
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            ),
+        )),
+        NotificationEvent::Heartbeat => Some((
+            "ℹ️ UESTC Power Monitor - Daily Report".to_string(),
+            format!(
+                "Room: {}\nMoney: {:.2} CNY\nEnergy: {:.2} kWh\nTime: {}",
+                info.room_display_name,
+                info.remaining_money,
+                info.remaining_energy,
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            ),
+        )),
+        NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => None,
+    }
+}
+
+fn build_error_notification(error_msg: &str, event: NotificationEvent) -> Option<(String, String)> {
+    match event {
+        NotificationEvent::LoginFailure => Some((
+            "🔐 UESTC Power Monitor - Login Failure".to_string(),
+            format!(
+                "{}\nTime: {}",
+                error_msg,
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            ),
+        )),
+        NotificationEvent::ConsecutiveFetchFailures => Some((
+            "❌ UESTC Power Monitor - Fetch Failures".to_string(),
+            format!(
+                "{}\nTime: {}",
+                error_msg,
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            ),
+        )),
+        NotificationEvent::LowBalance | NotificationEvent::Heartbeat => None,
+    }
+}
+
+pub struct PushoverNotifier {
+    client: reqwest::Client,
+    api_token: String,
+    user_key: String,
+    default_priority: i8,
+    default_retry: u32,
+    default_expire: u32,
+    default_url: Option<String>,
+}
+
+impl PushoverNotifier {
+    pub fn new(
+        api_token: String,
+        user_key: String,
+        default_priority: i8,
+        default_retry: u32,
+        default_expire: u32,
+        default_url: Option<String>,
+    ) -> Self {
+        Self {
+            client: create_http_client(),
+            api_token,
+            user_key,
+            default_priority,
+            default_retry,
+            default_expire,
+            default_url,
+        }
+    }
+
+    fn clamp_priority(priority: i8) -> i8 {
+        priority.clamp(-2, 2)
+    }
+
+    fn sanitize_emergency_params(retry: u32, expire: u32) -> (u32, u32) {
+        let retry = retry.max(30);
+        let expire = expire.clamp(30, 10_800);
+        (retry, expire)
+    }
+
+    async fn send_message(
+        &self,
+        message: &str,
+        title: Option<&str>,
+        priority: i8,
+        url: Option<&str>,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut payload = HashMap::<String, String>::new();
+        let clamped_priority = Self::clamp_priority(priority);
+        payload.insert("token".to_string(), self.api_token.clone());
+        payload.insert("user".to_string(), self.user_key.clone());
+        payload.insert("message".to_string(), message.to_string());
+        payload.insert("priority".to_string(), clamped_priority.to_string());
+
+        if clamped_priority == 2 {
+            let (retry, expire) =
+                Self::sanitize_emergency_params(self.default_retry, self.default_expire);
+            payload.insert("retry".to_string(), retry.to_string());
+            payload.insert("expire".to_string(), expire.to_string());
+        }
+
+        if let Some(title) = title {
+            if !title.trim().is_empty() {
+                payload.insert("title".to_string(), title.to_string());
+            }
+        }
+
+        if let Some(url) = url {
+            if !url.trim().is_empty() {
+                payload.insert("url".to_string(), url.to_string());
+            }
+        }
+
+        debug!("Sending Pushover notification");
+        self.client
+            .post("https://api.pushover.net/1/messages.json")
+            .form(&payload)
+            .send()
+            .await?
+            .error_for_status()?;
+        debug!("Pushover notification sent successfully");
+        Ok(())
+    }
+}
+
+impl Notifier for PushoverNotifier {
+    fn notify<'a>(
+        &'a self,
+        info: &'a PowerInfo,
+        event: NotificationEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            let Some((title, message)) = build_power_notification(info, event) else {
+                return Ok(());
+            };
+
+            self.send_message(
+                &message,
+                Some(&title),
+                self.default_priority,
+                self.default_url.as_deref(),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn notify_error<'a>(
+        &'a self,
+        error_msg: &'a str,
+        event: NotificationEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            let Some((title, message)) = build_error_notification(error_msg, event) else {
+                return Ok(());
+            };
+
+            self.send_message(
+                &message,
+                Some(&title),
+                self.default_priority,
+                self.default_url.as_deref(),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+}
+
+pub struct NtfyNotifier {
+    client: reqwest::Client,
+    topic_url: String,
+    default_priority: u8,
+    default_tags: Vec<String>,
+    click_action: Option<String>,
+    icon: Option<String>,
+    actions: Vec<serde_json::Value>,
+    use_markdown: bool,
+}
+
+impl NtfyNotifier {
+    pub fn new(
+        topic_url: String,
+        default_priority: u8,
+        default_tags: Vec<String>,
+        click_action: Option<String>,
+        icon: Option<String>,
+        actions: Vec<serde_json::Value>,
+        use_markdown: bool,
+    ) -> Self {
+        Self {
+            client: create_http_client(),
+            topic_url,
+            default_priority,
+            default_tags,
+            click_action,
+            icon,
+            actions,
+            use_markdown,
+        }
+    }
+
+    fn clamp_priority(priority: u8) -> u8 {
+        priority.clamp(1, 5)
+    }
+
+    async fn send_message(
+        &self,
+        message: &str,
+        title: Option<&str>,
+        priority: u8,
+        tags: Option<&[String]>,
+        click_action: Option<&str>,
+        icon: Option<&str>,
+        actions: Option<&[serde_json::Value]>,
+        use_markdown: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "message".to_string(),
+            serde_json::Value::String(message.to_string()),
+        );
+        payload.insert(
+            "priority".to_string(),
+            serde_json::Value::Number(Self::clamp_priority(priority).into()),
+        );
+        payload.insert(
+            "markdown".to_string(),
+            serde_json::Value::Bool(use_markdown),
+        );
+
+        if let Some(title) = title {
+            if !title.trim().is_empty() {
+                payload.insert(
+                    "title".to_string(),
+                    serde_json::Value::String(title.to_string()),
+                );
+            }
+        }
+
+        if let Some(tags) = tags {
+            if !tags.is_empty() {
+                payload.insert("tags".to_string(), serde_json::json!(tags));
+            }
+        }
+
+        if let Some(click_action) = click_action {
+            if !click_action.trim().is_empty() {
+                payload.insert(
+                    "click".to_string(),
+                    serde_json::Value::String(click_action.to_string()),
+                );
+            }
+        }
+
+        if let Some(icon) = icon {
+            if !icon.trim().is_empty() {
+                payload.insert(
+                    "icon".to_string(),
+                    serde_json::Value::String(icon.to_string()),
+                );
+            }
+        }
+
+        if let Some(actions) = actions {
+            if !actions.is_empty() {
+                payload.insert("actions".to_string(), serde_json::json!(actions));
+            }
+        }
+
+        debug!("Sending ntfy notification");
+        self.client
+            .post(&self.topic_url)
+            .json(&serde_json::Value::Object(payload))
+            .send()
+            .await?
+            .error_for_status()?;
+        debug!("ntfy notification sent successfully");
+        Ok(())
+    }
+}
+
+impl Notifier for NtfyNotifier {
+    fn notify<'a>(
+        &'a self,
+        info: &'a PowerInfo,
+        event: NotificationEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            let Some((title, message)) = build_power_notification(info, event) else {
+                return Ok(());
+            };
+
+            self.send_message(
+                &message,
+                Some(&title),
+                self.default_priority,
+                Some(&self.default_tags),
+                self.click_action.as_deref(),
+                self.icon.as_deref(),
+                Some(&self.actions),
+                self.use_markdown,
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn notify_error<'a>(
+        &'a self,
+        error_msg: &'a str,
+        event: NotificationEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            let Some((title, message)) = build_error_notification(error_msg, event) else {
+                return Ok(());
+            };
+
+            self.send_message(
+                &message,
+                Some(&title),
+                self.default_priority,
+                Some(&self.default_tags),
+                self.click_action.as_deref(),
+                self.icon.as_deref(),
+                Some(&self.actions),
+                self.use_markdown,
+            )
+            .await?;
+            Ok(())
+        })
+    }
+}
+
 pub struct EmailNotifier {
     transport: AsyncSmtpTransport<Tokio1Executor>,
     from: String,
@@ -486,7 +979,8 @@ pub struct EmailNotifier {
 impl EmailNotifier {
     pub fn new(config: &NotifyConfig) -> Result<Self, Box<dyn Error>> {
         // Parse recipients (comma-separated)
-        let to: Vec<String> = config.smtp_to
+        let to: Vec<String> = config
+            .smtp_to
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())

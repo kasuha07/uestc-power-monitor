@@ -112,36 +112,54 @@ impl ApiService {
 
         let resp = resp.json::<ApiResponse<PowerInfo>>().await?;
 
-        debug!("API response: error={}, message={}", resp.error, resp.message);
+        debug!(
+            "API response: error={}, message={}",
+            resp.error, resp.message
+        );
 
         // Session expired (401) — re-login and retry once
         if resp.error == 401 {
-            warn!("Session expired (error=401, message='{}'). Re-logging in...", resp.message);
+            warn!(
+                "Session expired (error=401, message='{}'). Re-logging in...",
+                resp.message
+            );
             self.login().await?;
-            let retry_resp = self.client
+            let retry_resp = self
+                .client
                 .get(&url)
                 .header("Referer", "https://online.uestc.edu.cn/page/")
                 .header("Accept", "application/json, text/plain, */*")
                 .send()
                 .await?;
             let resp = retry_resp.json::<ApiResponse<PowerInfo>>().await?;
-            debug!("Retry API response: error={}, message={}", resp.error, resp.message);
+            debug!(
+                "Retry API response: error={}, message={}",
+                resp.error, resp.message
+            );
             if let Some(ref data) = resp.data {
-                info!("Power info received: room={}, money={:.2}, energy={:.2}",
-                    data.room_display_name, data.remaining_money, data.remaining_energy);
+                info!(
+                    "Power info received: room={}, money={:.2}, energy={:.2}",
+                    data.room_display_name, data.remaining_money, data.remaining_energy
+                );
             } else {
-                warn!("API returned no data after re-login - error_code={}, message='{}', url='{}'",
-                    resp.error, resp.message, url);
+                warn!(
+                    "API returned no data after re-login - error_code={}, message='{}', url='{}'",
+                    resp.error, resp.message, url
+                );
             }
             return Ok(resp.data);
         }
 
         if let Some(ref data) = resp.data {
-            info!("Power info received: room={}, money={:.2}, energy={:.2}",
-                data.room_display_name, data.remaining_money, data.remaining_energy);
+            info!(
+                "Power info received: room={}, money={:.2}, energy={:.2}",
+                data.room_display_name, data.remaining_money, data.remaining_energy
+            );
         } else {
-            warn!("API returned no data - error_code={}, message='{}', url='{}'. This usually means: 1) No room is bound to your account, 2) Session expired, or 3) API service issue",
-                resp.error, resp.message, url);
+            warn!(
+                "API returned no data - error_code={}, message='{}', url='{}'. This usually means: 1) No room is bound to your account, 2) Session expired, or 3) API service issue",
+                resp.error, resp.message, url
+            );
         }
 
         Ok(resp.data)
