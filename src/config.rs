@@ -137,6 +137,8 @@ pub struct NotifyConfig {
     // ntfy configuration
     #[serde(default)]
     pub ntfy_topic_url: String,
+    #[serde(default)]
+    pub ntfy_token: String,
     #[serde(default = "default_ntfy_priority")]
     pub ntfy_priority: u8,
     #[serde(default)]

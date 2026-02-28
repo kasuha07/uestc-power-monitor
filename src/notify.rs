@@ -325,6 +325,7 @@ pub fn create_single_notifier(
 
             Some(Box::new(NtfyNotifier::new(
                 topic_url.to_string(),
+                optional_string(&config.ntfy_token),
                 config.ntfy_priority,
                 config.ntfy_tags.clone(),
                 optional_string(&config.ntfy_click_action),
@@ -808,6 +809,7 @@ impl Notifier for PushoverNotifier {
 pub struct NtfyNotifier {
     client: reqwest::Client,
     topic_url: String,
+    access_token: Option<String>,
     default_priority: u8,
     default_tags: Vec<String>,
     click_action: Option<String>,
@@ -819,6 +821,7 @@ pub struct NtfyNotifier {
 impl NtfyNotifier {
     pub fn new(
         topic_url: String,
+        access_token: Option<String>,
         default_priority: u8,
         default_tags: Vec<String>,
         click_action: Option<String>,
@@ -829,6 +832,7 @@ impl NtfyNotifier {
         Self {
             client: create_http_client(),
             topic_url,
+            access_token,
             default_priority,
             default_tags,
             click_action,
@@ -907,12 +911,18 @@ impl NtfyNotifier {
         }
 
         debug!("Sending ntfy notification");
-        self.client
+        let mut request = self
+            .client
             .post(&self.topic_url)
-            .json(&serde_json::Value::Object(payload))
-            .send()
-            .await?
-            .error_for_status()?;
+            .json(&serde_json::Value::Object(payload));
+
+        if let Some(access_token) = self.access_token.as_deref() {
+            if !access_token.trim().is_empty() {
+                request = request.bearer_auth(access_token.trim());
+            }
+        }
+
+        request.send().await?.error_for_status()?;
         debug!("ntfy notification sent successfully");
         Ok(())
     }

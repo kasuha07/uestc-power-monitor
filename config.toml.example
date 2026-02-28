@@ -54,6 +54,7 @@ pushover_url = "https://example.com"     # 点击通知跳转链接（可选）
 
 # ntfy 配置 (仅 notify_type = "ntfy" 时需要)
 ntfy_topic_url = "https://ntfy.sh/your-topic"  # 完整 topic 发布 URL（必须 https，且主机不能是/不能解析到 localhost 或内网 IP）
+ntfy_token = ""                                 # 访问令牌（可选，发送时使用 Bearer Token）
 ntfy_priority = 3                               # 优先级: 1(最低) 到 5(最高)
 ntfy_tags = ["warning", "zap"]                 # 标签 / emoji（可选）
 ntfy_click_action = "https://example.com"      # 点击通知跳转链接（可选）
