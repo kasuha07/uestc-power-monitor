@@ -772,11 +772,15 @@ impl Notifier for PushoverNotifier {
             let Some((title, message)) = build_power_notification(info, event) else {
                 return Ok(());
             };
+            let priority = match event {
+                NotificationEvent::LowBalance => 2, // highest/emergency priority
+                _ => self.default_priority,
+            };
 
             self.send_message(
                 &message,
                 Some(&title),
-                self.default_priority,
+                priority,
                 self.default_url.as_deref(),
             )
             .await?;
@@ -938,11 +942,15 @@ impl Notifier for NtfyNotifier {
             let Some((title, message)) = build_power_notification(info, event) else {
                 return Ok(());
             };
+            let priority = match event {
+                NotificationEvent::LowBalance => 5, // highest priority
+                _ => self.default_priority,
+            };
 
             self.send_message(
                 &message,
                 Some(&title),
-                self.default_priority,
+                priority,
                 Some(&self.default_tags),
                 self.click_action.as_deref(),
                 self.icon.as_deref(),

@@ -91,13 +91,13 @@ cargo build --release
 | `UPM_NOTIFY__TELEGRAM_CHAT_ID` | `notify.telegram_chat_id` | Telegram Chat ID |
 | `UPM_NOTIFY__PUSHOVER_API_TOKEN` | `notify.pushover_api_token` | Pushover App Token |
 | `UPM_NOTIFY__PUSHOVER_USER_KEY` | `notify.pushover_user_key` | Pushover User Key |
-| `UPM_NOTIFY__PUSHOVER_PRIORITY` | `notify.pushover_priority` | Pushover 优先级 (-2 到 2，默认 0) |
+| `UPM_NOTIFY__PUSHOVER_PRIORITY` | `notify.pushover_priority` | Pushover 默认优先级 (-2 到 2，默认 0；低余额告警固定为 2) |
 | `UPM_NOTIFY__PUSHOVER_RETRY` | `notify.pushover_retry` | Pushover priority=2 时重试间隔秒数（最小 30） |
 | `UPM_NOTIFY__PUSHOVER_EXPIRE` | `notify.pushover_expire` | Pushover priority=2 时总重试时长秒数（30-10800） |
 | `UPM_NOTIFY__PUSHOVER_URL` | `notify.pushover_url` | Pushover 点击跳转 URL (可选) |
 | `UPM_NOTIFY__NTFY_TOPIC_URL` | `notify.ntfy_topic_url` | ntfy Topic URL (完整发布地址，必须 https，且主机不能是/不能解析到 localhost 或内网 IP) |
 | `UPM_NOTIFY__NTFY_TOKEN` | `notify.ntfy_token` | ntfy 访问令牌（可选，发送时使用 Bearer Token） |
-| `UPM_NOTIFY__NTFY_PRIORITY` | `notify.ntfy_priority` | ntfy 优先级 (1 到 5，默认 3) |
+| `UPM_NOTIFY__NTFY_PRIORITY` | `notify.ntfy_priority` | ntfy 默认优先级 (1 到 5，默认 3；低余额告警固定为 5) |
 | `UPM_NOTIFY__NTFY_TAGS` | `notify.ntfy_tags` | ntfy 标签 (逗号分隔，如 "warning,skull") |
 | `UPM_NOTIFY__NTFY_CLICK_ACTION` | `notify.ntfy_click_action` | ntfy 点击跳转 URL (可选) |
 | `UPM_NOTIFY__NTFY_ICON` | `notify.ntfy_icon` | ntfy 图标 URL (可选) |
@@ -160,8 +160,8 @@ UPM_NOTIFY__NOTIFY_TYPES="telegram,ntfy,pushover"
 1. **Console**: 输出到控制台日志，无需额外配置
 2. **Webhook**: 发送 JSON 数据到指定 URL，需配置 `webhook_url`
 3. **Telegram**: 通过 Telegram Bot 发送消息，需配置 `telegram_bot_token` 和 `telegram_chat_id`
-4. **Pushover**: 调用 Pushover API 发送通知，需配置 `pushover_api_token` 与 `pushover_user_key`（`priority=2` 时还需 `pushover_retry` / `pushover_expire`）
-5. **ntfy**: 通过 ntfy Topic 推送通知，需配置 `ntfy_topic_url`（必须 https，且主机不能是/不能解析到 localhost 或内网 IP；可选 `ntfy_token`、tags / click / icon / actions / markdown）
+4. **Pushover**: 调用 Pushover API 发送通知，需配置 `pushover_api_token` 与 `pushover_user_key`（低余额告警固定最高优先级 `2`；其他事件使用 `pushover_priority`；`priority=2` 时还需 `pushover_retry` / `pushover_expire`）
+5. **ntfy**: 通过 ntfy Topic 推送通知，需配置 `ntfy_topic_url`（必须 https，且主机不能是/不能解析到 localhost 或内网 IP；低余额告警固定最高优先级 `5`；其他事件使用 `ntfy_priority`；可选 `ntfy_token`、tags / click / icon / actions / markdown）
 6. **Email**: 通过 SMTP 发送邮件，需配置完整的 SMTP 参数（服务器、端口、认证信息等）
 
 ## 数据表结构

@@ -47,7 +47,7 @@ telegram_chat_id = "your_chat_id"
 # Pushover 配置 (仅 notify_type = "pushover" 时需要)
 pushover_api_token = "your_pushover_app_token"
 pushover_user_key = "your_pushover_user_key"
-pushover_priority = 0                    # 优先级: -2(最低) 到 2(紧急)
+pushover_priority = 0                    # 默认优先级: -2(最低) 到 2(紧急)，低余额告警固定为 2
 pushover_retry = 60                      # priority=2(紧急) 时重试间隔秒数，最小 30
 pushover_expire = 3600                   # priority=2(紧急) 时重试总时长秒数，范围 30-10800
 pushover_url = "https://example.com"     # 点击通知跳转链接（可选）
@@ -55,7 +55,7 @@ pushover_url = "https://example.com"     # 点击通知跳转链接（可选）
 # ntfy 配置 (仅 notify_type = "ntfy" 时需要)
 ntfy_topic_url = "https://ntfy.sh/your-topic"  # 完整 topic 发布 URL（必须 https，且主机不能是/不能解析到 localhost 或内网 IP）
 ntfy_token = ""                                 # 访问令牌（可选，发送时使用 Bearer Token）
-ntfy_priority = 3                               # 优先级: 1(最低) 到 5(最高)
+ntfy_priority = 3                               # 默认优先级: 1(最低) 到 5(最高)，低余额告警固定为 5
 ntfy_tags = ["warning", "zap"]                 # 标签 / emoji（可选）
 ntfy_click_action = "https://example.com"      # 点击通知跳转链接（可选）
 ntfy_icon = "https://example.com/icon.png"     # 图标 URL（可选）
