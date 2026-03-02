@@ -1,7 +1,9 @@
 use crate::api::PowerInfo;
 use crate::config::{NotifyConfig, NotifyType};
+use crate::time;
 use crate::utils::retry;
-use chrono::{Local, Timelike};
+use chrono::Timelike;
+use chrono_tz::Tz;
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
@@ -29,11 +31,11 @@ pub enum NotificationEvent {
 pub struct NotificationManager {
     config: NotifyConfig,
     notifiers: Vec<Box<dyn Notifier>>,
-    last_low_balance_notify_time: Option<chrono::DateTime<Local>>,
+    last_low_balance_notify_time: Option<chrono::DateTime<Tz>>,
     last_heartbeat_date: Option<chrono::NaiveDate>,
     last_balance: Option<f64>,
     consecutive_fetch_failures: u32,
-    last_fetch_failure_notify_time: Option<chrono::DateTime<Local>>,
+    last_fetch_failure_notify_time: Option<chrono::DateTime<Tz>>,
 }
 
 impl NotificationManager {
@@ -95,7 +97,7 @@ impl NotificationManager {
     }
 
     pub async fn check_and_notify(&mut self, data: &PowerInfo) {
-        let now = Local::now();
+        let now = time::now();
         debug!("Checking notification conditions at {}", now);
 
         // Heartbeat Check
@@ -199,7 +201,7 @@ impl NotificationManager {
         }
 
         if self.consecutive_fetch_failures >= self.config.fetch_failure_threshold {
-            let now = Local::now();
+            let now = time::now();
             let should_notify = if let Some(last_time) = self.last_fetch_failure_notify_time {
                 let elapsed = now.signed_duration_since(last_time);
                 elapsed.num_minutes() >= self.config.fetch_failure_cooldown_minutes as i64
@@ -526,7 +528,7 @@ impl Notifier for WebhookNotifier {
                 "title": "UESTC Power Monitor",
                 "event": event_str,
                 "error": error_msg,
-                "timestamp": chrono::Local::now().to_rfc3339(),
+                "timestamp": time::now_rfc3339(),
             });
 
             debug!("Sending webhook error notification: event={}", event_str);
@@ -638,7 +640,7 @@ fn build_power_notification(
                 info.room_display_name,
                 info.remaining_money,
                 info.remaining_energy,
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                time::now_display()
             ),
         )),
         NotificationEvent::Heartbeat => Some((
@@ -648,7 +650,7 @@ fn build_power_notification(
                 info.room_display_name,
                 info.remaining_money,
                 info.remaining_energy,
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                time::now_display()
             ),
         )),
         NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => None,
@@ -659,19 +661,11 @@ fn build_error_notification(error_msg: &str, event: NotificationEvent) -> Option
     match event {
         NotificationEvent::LoginFailure => Some((
             "🔐 UESTC Power Monitor - Login Failure".to_string(),
-            format!(
-                "{}\nTime: {}",
-                error_msg,
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-            ),
+            format!("{}\nTime: {}", error_msg, time::now_display()),
         )),
         NotificationEvent::ConsecutiveFetchFailures => Some((
             "❌ UESTC Power Monitor - Fetch Failures".to_string(),
-            format!(
-                "{}\nTime: {}",
-                error_msg,
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-            ),
+            format!("{}\nTime: {}", error_msg, time::now_display()),
         )),
         NotificationEvent::LowBalance | NotificationEvent::Heartbeat => None,
     }
@@ -1087,7 +1081,7 @@ impl Notifier for EmailNotifier {
                         info.room_display_name,
                         info.remaining_money,
                         info.remaining_energy,
-                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                        time::now_display()
                     );
                     (subject, body)
                 }
@@ -1106,7 +1100,7 @@ impl Notifier for EmailNotifier {
                         info.room_display_name,
                         info.remaining_money,
                         info.remaining_energy,
-                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                        time::now_display()
                     );
                     (subject, body)
                 }
@@ -1142,7 +1136,7 @@ impl Notifier for EmailNotifier {
                         \n\
                         Time: {}",
                         error_msg,
-                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                        time::now_display()
                     );
                     (subject, body)
                 }
@@ -1160,7 +1154,7 @@ impl Notifier for EmailNotifier {
                         \n\
                         Time: {}",
                         error_msg,
-                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                        time::now_display()
                     );
                     (subject, body)
                 }

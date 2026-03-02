@@ -42,6 +42,10 @@ COPY --from=builder /usr/src/app/target/release/uestc-power-monitor /usr/local/b
 # Set working directory
 WORKDIR /app
 
+# Default runtime timezone (application-level + libc-level)
+ENV TZ=Asia/Shanghai
+ENV UPM_TIMEZONE=Asia/Shanghai
+
 # The application looks for config.toml in the working directory
 # It can also be configured via environment variables (UPM_*)
 

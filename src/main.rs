@@ -1,17 +1,14 @@
 use tracing::error;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::FormatTime;
+use uestc_power_monitor::time;
 
-// Custom time formatter that uses local timezone (respects TZ environment variable)
+// Custom time formatter that uses application timezone (defaults to Asia/Shanghai)
 struct LocalTimeFormatter;
 
 impl FormatTime for LocalTimeFormatter {
     fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
-        write!(
-            w,
-            "{}",
-            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.6f%:z")
-        )
+        write!(w, "{}", time::now().format("%Y-%m-%dT%H:%M:%S%.6f%:z"))
     }
 }
 

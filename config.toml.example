@@ -14,6 +14,9 @@ interval_seconds = 600
 # SQLite 数据库连接地址
 database_url = "sqlite://power_monitor.db"
 
+# 应用时区（IANA），默认 Asia/Shanghai
+timezone = "Asia/Shanghai"
+
 # 通知配置
 [notify]
 enabled = true            # 是否启用通知

@@ -1,4 +1,5 @@
 use crate::api::PowerInfo;
+use crate::time;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Pool, Sqlite};
 use std::path::Path;
@@ -64,7 +65,7 @@ impl DbService {
                 building_id TEXT NOT NULL,
                 campus_id TEXT NOT NULL,
                 room_number TEXT NOT NULL,
-                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL
             );
             "#,
         )
@@ -85,9 +86,9 @@ impl DbService {
             r#"
             INSERT INTO power_records (
                 remaining_energy, remaining_money, meter_room_id,
-                room_display_name, room_id, building_id, campus_id, room_number
+                room_display_name, room_id, building_id, campus_id, room_number, created_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(data.remaining_energy)
@@ -98,10 +99,79 @@ impl DbService {
         .bind(&data.building_id)
         .bind(&data.campus_id)
         .bind(&data.room_number)
+        .bind(time::now_rfc3339())
         .execute(&self.pool)
         .await?;
 
         debug!("Data saved successfully to database");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::DateTime;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn sample_power_info() -> PowerInfo {
+        PowerInfo {
+            code: 0,
+            message: "ok".to_string(),
+            remaining_energy: 10.0,
+            remaining_money: 20.0,
+            meter_room_id: "meter-room-id".to_string(),
+            room_display_name: "220407".to_string(),
+            room_id: "room-id".to_string(),
+            building_id: "building-id".to_string(),
+            campus_id: "campus-id".to_string(),
+            room_number: "407".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn save_data_stores_rfc3339_created_at_with_offset() {
+        let _guard = crate::time::TEST_TIME_MUTEX
+            .lock()
+            .expect("lock timezone test mutex");
+        let original_timezone = crate::time::current_timezone_name();
+        crate::time::set_timezone("Asia/Shanghai").expect("set test timezone");
+
+        let uniq = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("upm-created-at-{uniq}.db"));
+        let database_url = format!("sqlite://{}", db_path.display());
+
+        let service = DbService::new(database_url.clone())
+            .await
+            .expect("create db service");
+        service.init().await.expect("init db");
+        service
+            .save_data(&sample_power_info())
+            .await
+            .expect("save power info");
+
+        let read_url = format!("{}?mode=ro", database_url);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&read_url)
+            .await
+            .expect("connect read pool");
+        let created_at: String =
+            sqlx::query_scalar("SELECT created_at FROM power_records ORDER BY id DESC LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .expect("read created_at");
+
+        let parsed =
+            DateTime::parse_from_rfc3339(&created_at).expect("created_at should be RFC3339");
+        assert_eq!(parsed.offset().local_minus_utc(), 8 * 3600);
+
+        drop(pool);
+        drop(service);
+        let _ = std::fs::remove_file(db_path);
+        crate::time::set_timezone(&original_timezone).expect("restore timezone");
     }
 }

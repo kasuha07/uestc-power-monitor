@@ -20,6 +20,8 @@ pub struct AppConfig {
     pub password: Option<String>,
     pub service_url: Option<String>,
     pub database_url: String,
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
     #[serde(default)]
     pub login_type: LoginType,
     #[serde(default = "default_cookie_file")]
@@ -32,6 +34,10 @@ pub struct AppConfig {
 
 fn default_interval() -> u64 {
     600 // 10 minutes
+}
+
+fn default_timezone() -> String {
+    "Asia/Shanghai".to_string()
 }
 
 fn default_threshold() -> f64 {
@@ -239,6 +245,97 @@ impl AppConfig {
                 .list_separator(","),
         );
 
-        builder.build()?.try_deserialize()
+        let mut cfg: AppConfig = builder.build()?.try_deserialize()?;
+        if let Ok(tz) = std::env::var("UPM_TIMEZONE") {
+            let tz = tz.trim();
+            if !tz.is_empty() {
+                cfg.timezone = tz.to_string();
+            }
+        }
+
+        Ok(cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static CONFIG_TEST_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct TestConfigGuard {
+        original_cwd: PathBuf,
+        original_upm_timezone: Option<String>,
+        temp_dir: PathBuf,
+    }
+
+    impl Drop for TestConfigGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original_cwd);
+            match &self.original_upm_timezone {
+                Some(value) => {
+                    // SAFETY: test code runs under a global mutex to avoid concurrent env writes.
+                    unsafe { std::env::set_var("UPM_TIMEZONE", value) }
+                }
+                None => {
+                    // SAFETY: test code runs under a global mutex to avoid concurrent env writes.
+                    unsafe { std::env::remove_var("UPM_TIMEZONE") }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.temp_dir);
+        }
+    }
+
+    fn setup_test_config(config_toml: &str, upm_timezone: Option<&str>) -> TestConfigGuard {
+        let original_cwd = std::env::current_dir().expect("read current dir");
+        let original_upm_timezone = std::env::var("UPM_TIMEZONE").ok();
+
+        let uniq = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("upm-config-test-{uniq}"));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        std::fs::write(temp_dir.join("config.toml"), config_toml).expect("write config.toml");
+        std::env::set_current_dir(&temp_dir).expect("enter temp dir");
+
+        match upm_timezone {
+            Some(value) => {
+                // SAFETY: test code runs under a global mutex to avoid concurrent env writes.
+                unsafe { std::env::set_var("UPM_TIMEZONE", value) }
+            }
+            None => {
+                // SAFETY: test code runs under a global mutex to avoid concurrent env writes.
+                unsafe { std::env::remove_var("UPM_TIMEZONE") }
+            }
+        }
+
+        TestConfigGuard {
+            original_cwd,
+            original_upm_timezone,
+            temp_dir,
+        }
+    }
+
+    #[test]
+    fn timezone_defaults_to_asia_shanghai_when_missing() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock config test mutex");
+        let _guard = setup_test_config("database_url = \"sqlite://test.db\"\n", None);
+        let cfg = AppConfig::new().expect("load config");
+        assert_eq!(cfg.timezone, "Asia/Shanghai");
+    }
+
+    #[test]
+    fn env_timezone_overrides_config_timezone() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock config test mutex");
+        let _guard = setup_test_config(
+            "database_url = \"sqlite://test.db\"\ntimezone = \"UTC\"\n",
+            Some("Asia/Tokyo"),
+        );
+        let cfg = AppConfig::new().expect("load config");
+        assert_eq!(cfg.timezone, "Asia/Tokyo");
     }
 }

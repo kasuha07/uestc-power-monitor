@@ -2,30 +2,49 @@ pub mod api;
 pub mod config;
 pub mod db;
 pub mod notify;
+pub mod time;
 pub mod utils;
 
 use crate::api::ApiService;
 use crate::config::AppConfig;
 use crate::db::DbService;
 use crate::notify::NotificationManager;
+use crate::time::DEFAULT_TIMEZONE;
 use crate::utils::retry;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    info!("Starting Uestc Power Monitor...");
     let config = match AppConfig::new() {
-        Ok(cfg) => {
-            debug!("Configuration loaded successfully");
-            cfg
-        }
+        Ok(cfg) => cfg,
         Err(e) => {
             error!("Failed to load configuration: {}", e);
             return Err(e.into());
         }
     };
+
+    let configured_timezone = config.timezone.trim();
+    if let Err(e) = crate::time::set_timezone(configured_timezone) {
+        warn!(
+            "Invalid timezone '{}': {}. Falling back to {}",
+            crate::time::sanitize_for_log(configured_timezone),
+            e,
+            DEFAULT_TIMEZONE
+        );
+        crate::time::set_timezone(DEFAULT_TIMEZONE).map_err(|fallback_err| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, fallback_err)
+        })?;
+    }
+
+    info!("Starting Uestc Power Monitor...");
+    debug!("Configuration loaded successfully");
+    info!(
+        "Application timezone set to {}",
+        crate::time::current_timezone_name()
+    );
+
     // initialize services
     debug!("Initializing API service...");
     let api_service = match retry(|| ApiService::new(&config), 3, Duration::from_secs(5)).await {

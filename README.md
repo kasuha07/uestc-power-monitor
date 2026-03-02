@@ -11,6 +11,7 @@
 - 🚨 **低余额报警**: 当余额低于设定阈值时，自动发送通知。
 - 💓 **每日心跳**: 每天定时发送余额报告，确保监控正常运行。
 - 📢 **多渠道通知**: 支持 Console、Webhook、Telegram Bot、Pushover、ntfy 和 Email (SMTP)，可同时启用多个通知渠道。
+- 🕒 **统一时区**: 应用内时间默认使用 `Asia/Shanghai`，日志/通知/心跳/入库时间语义一致。
 - 🐳 **Docker 支持**: 提供完整的 Docker 镜像构建和 Docker Compose 配置，支持 Docker Secrets。
 
 ## 快速开始
@@ -61,6 +62,12 @@ cargo build --release
 
 配置加载优先级：**环境变量 > Docker Secrets > 配置文件**。
 
+时区规则：
+- 默认使用 `Asia/Shanghai`
+- 优先级：`UPM_TIMEZONE`（环境变量）> `timezone`（配置文件）> 默认值
+- 若 `UPM_TIMEZONE` 或 `timezone` 非法，程序会记录告警并回退到 `Asia/Shanghai`
+- 业务时间（日志、通知、心跳、`created_at`）不依赖系统 `TZ`
+
 ### 1. 配置文件 (config.toml)
 
 完整配置项请参考 `config.toml.example`。
@@ -74,6 +81,7 @@ cargo build --release
 | `UPM_USERNAME` | `username` | 学号 |
 | `UPM_PASSWORD` | `password` | 密码 |
 | `UPM_DATABASE_URL` | `database_url` | 数据库连接字符串 |
+| `UPM_TIMEZONE` | `timezone` | 应用时区（IANA 名称，如 `Asia/Shanghai`） |
 | `UPM_INTERVAL_SECONDS` | `interval_seconds` | 轮询间隔(秒) |
 | `UPM_LOGIN_TYPE` | `login_type` | 登录方式 (password/wechat) |
 | `UPM_COOKIE_FILE` | `cookie_file` | Cookie 文件路径 |
@@ -175,7 +183,7 @@ UPM_NOTIFY__NOTIFY_TYPES="telegram,ntfy,pushover"
 | remaining_money | REAL | 剩余金额 (元) |
 | meter_room_id | TEXT | 电表房间ID |
 | room_display_name | TEXT | 房间显示名称 |
-| created_at | DATETIME | 记录时间 |
+| created_at | TEXT | 记录时间（RFC3339，含时区偏移，如 `+08:00`） |
 | ... | ... | 其他位置信息字段 |
 
 ## License
