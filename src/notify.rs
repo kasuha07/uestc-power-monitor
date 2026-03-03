@@ -264,7 +264,13 @@ pub fn create_single_notifier(
                 warn!("Webhook notifier skipped: webhook_url is not configured");
                 return None;
             }
-            Some(Box::new(WebhookNotifier::new(config.webhook_url.clone())))
+
+            let webhook_url = match validate_https_public_url(&config.webhook_url, "webhook_url") {
+                Some(url) => url,
+                None => return None,
+            };
+
+            Some(Box::new(WebhookNotifier::new(webhook_url.to_string())))
         }
         NotifyType::Telegram => {
             if config.telegram_bot_token.is_empty() || config.telegram_chat_id.is_empty() {
@@ -300,30 +306,11 @@ pub fn create_single_notifier(
                 return None;
             }
 
-            let topic_url = match reqwest::Url::parse(&config.ntfy_topic_url) {
-                Ok(url) => url,
-                Err(_) => {
-                    warn!("ntfy notifier skipped: ntfy_topic_url is not a valid URL");
-                    return None;
-                }
-            };
-
-            if topic_url.scheme() != "https" {
-                warn!("ntfy notifier skipped: ntfy_topic_url must use https");
-                return None;
-            }
-
-            if topic_url.host_str().is_none() {
-                warn!("ntfy notifier skipped: ntfy_topic_url must include a host");
-                return None;
-            }
-
-            if let Some(host) = topic_url.host_str() {
-                if is_disallowed_ntfy_host(host) || host_resolves_to_disallowed_ip(host) {
-                    warn!("ntfy notifier skipped: ntfy_topic_url host is not allowed");
-                    return None;
-                }
-            }
+            let topic_url =
+                match validate_https_public_url(&config.ntfy_topic_url, "ntfy_topic_url") {
+                    Some(url) => url,
+                    None => return None,
+                };
 
             Some(Box::new(NtfyNotifier::new(
                 topic_url.to_string(),
@@ -364,7 +351,77 @@ fn optional_string(value: &str) -> Option<String> {
     }
 }
 
-fn is_disallowed_ntfy_host(host: &str) -> bool {
+fn validate_https_public_url(raw_url: &str, field_name: &str) -> Option<reqwest::Url> {
+    let url = match reqwest::Url::parse(raw_url) {
+        Ok(url) => url,
+        Err(_) => {
+            warn!(
+                "{} notifier skipped: {} is not a valid URL",
+                field_name, field_name
+            );
+            return None;
+        }
+    };
+
+    if url.scheme() != "https" {
+        warn!(
+            "{} notifier skipped: {} must use https",
+            field_name, field_name
+        );
+        return None;
+    }
+
+    let host = match url.host_str() {
+        Some(host) => host,
+        None => {
+            warn!(
+                "{} notifier skipped: {} must include a host",
+                field_name, field_name
+            );
+            return None;
+        }
+    };
+
+    if is_disallowed_host(host) || host_resolves_to_disallowed_ip(host) {
+        warn!(
+            "{} notifier skipped: {} host is not allowed",
+            field_name, field_name
+        );
+        return None;
+    }
+
+    Some(url)
+}
+
+fn ensure_https_public_url(raw_url: &str, field_name: &str) -> Result<(), std::io::Error> {
+    match validate_https_public_url(raw_url, field_name) {
+        Some(_) => Ok(()),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is blocked by SSRF protection", field_name),
+        )),
+    }
+}
+
+async fn ensure_https_public_url_async(
+    raw_url: &str,
+    field_name: &str,
+) -> Result<(), std::io::Error> {
+    let raw_url = raw_url.to_string();
+    let field_name_owned = field_name.to_string();
+    let field_name_for_error = field_name_owned.clone();
+    tokio::task::spawn_blocking(move || ensure_https_public_url(&raw_url, &field_name_owned))
+        .await
+        .map_err(|e| {
+            std::io::Error::other(format!(
+                "failed to validate {} in blocking task: {}",
+                field_name_for_error, e
+            ))
+        })??;
+    Ok(())
+}
+
+fn is_disallowed_host(host: &str) -> bool {
     let host_lower = host.to_ascii_lowercase();
     if host_lower == "localhost" || host_lower.ends_with(".local") {
         return true;
@@ -381,6 +438,14 @@ fn is_disallowed_ntfy_host(host: &str) -> bool {
                     || ipv4.is_broadcast()
             }
             IpAddr::V6(ipv6) => {
+                if let Some(mapped_v4) = ipv6.to_ipv4_mapped() {
+                    return mapped_v4.is_private()
+                        || mapped_v4.is_loopback()
+                        || mapped_v4.is_link_local()
+                        || mapped_v4.is_multicast()
+                        || mapped_v4.is_unspecified()
+                        || mapped_v4.is_broadcast();
+                }
                 ipv6.is_loopback()
                     || ipv6.is_unique_local()
                     || ipv6.is_unicast_link_local()
@@ -400,7 +465,7 @@ fn host_resolves_to_disallowed_ip(host: &str) -> bool {
             let mut saw_any = false;
             for socket_addr in addrs.by_ref() {
                 saw_any = true;
-                if is_disallowed_ntfy_host(&socket_addr.ip().to_string()) {
+                if is_disallowed_host(&socket_addr.ip().to_string()) {
                     return true;
                 }
             }
@@ -415,6 +480,14 @@ fn create_http_client() -> reqwest::Client {
         .timeout(Duration::from_secs(10))
         .build()
         .expect("failed to build reqwest client with timeout")
+}
+
+fn create_untrusted_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("failed to build reqwest client with strict redirect policy")
 }
 
 pub struct ConsoleNotifier;
@@ -477,7 +550,7 @@ pub struct WebhookNotifier {
 impl WebhookNotifier {
     pub fn new(url: String) -> Self {
         Self {
-            client: create_http_client(),
+            client: create_untrusted_http_client(),
             url,
         }
     }
@@ -497,6 +570,7 @@ impl Notifier for WebhookNotifier {
                     return Ok(()); // These events use notify_error instead
                 }
             };
+            ensure_https_public_url_async(&self.url, "webhook_url").await?;
             debug!("Sending webhook notification: event={}", event_str);
             self.client
                 .post(&self.url)
@@ -531,6 +605,7 @@ impl Notifier for WebhookNotifier {
                 "timestamp": time::now_rfc3339(),
             });
 
+            ensure_https_public_url_async(&self.url, "webhook_url").await?;
             debug!("Sending webhook error notification: event={}", event_str);
             self.client
                 .post(&self.url)
@@ -828,7 +903,7 @@ impl NtfyNotifier {
         use_markdown: bool,
     ) -> Self {
         Self {
-            client: create_http_client(),
+            client: create_untrusted_http_client(),
             topic_url,
             access_token,
             default_priority,
@@ -855,6 +930,8 @@ impl NtfyNotifier {
         actions: Option<&[serde_json::Value]>,
         use_markdown: bool,
     ) -> Result<(), Box<dyn Error>> {
+        ensure_https_public_url_async(&self.topic_url, "ntfy_topic_url").await?;
+
         let mut payload = serde_json::Map::new();
         payload.insert(
             "message".to_string(),
@@ -1168,5 +1245,95 @@ impl Notifier for EmailNotifier {
             debug!("Email error notification sent successfully");
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NotifyConfig;
+
+    fn base_notify_config() -> NotifyConfig {
+        NotifyConfig {
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn webhook_notifier_allows_public_https_ip() {
+        let mut config = base_notify_config();
+        config.webhook_url = "https://8.8.8.8/hook".to_string();
+        let notifier = create_single_notifier(&config, NotifyType::Webhook);
+        assert!(notifier.is_some());
+    }
+
+    #[test]
+    fn webhook_notifier_rejects_non_https_url() {
+        let mut config = base_notify_config();
+        config.webhook_url = "http://8.8.8.8/hook".to_string();
+        let notifier = create_single_notifier(&config, NotifyType::Webhook);
+        assert!(notifier.is_none());
+    }
+
+    #[test]
+    fn webhook_notifier_rejects_local_and_private_hosts() {
+        for url in [
+            "https://localhost/hook",
+            "https://127.0.0.1/hook",
+            "https://[::1]/hook",
+            "https://10.0.0.1/hook",
+            "https://172.16.0.1/hook",
+            "https://192.168.1.10/hook",
+            "https://169.254.1.1/hook",
+            "https://example.local/hook",
+        ] {
+            let mut config = base_notify_config();
+            config.webhook_url = url.to_string();
+            let notifier = create_single_notifier(&config, NotifyType::Webhook);
+            assert!(
+                notifier.is_none(),
+                "expected webhook url to be rejected: {}",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn webhook_notifier_rejects_invalid_url() {
+        let mut config = base_notify_config();
+        config.webhook_url = "not-a-url".to_string();
+        let notifier = create_single_notifier(&config, NotifyType::Webhook);
+        assert!(notifier.is_none());
+    }
+
+    #[test]
+    fn ntfy_notifier_applies_same_url_restrictions() {
+        let mut allow = base_notify_config();
+        allow.ntfy_topic_url = "https://8.8.8.8/topic".to_string();
+        assert!(create_single_notifier(&allow, NotifyType::Ntfy).is_some());
+
+        let mut reject = base_notify_config();
+        reject.ntfy_topic_url = "https://127.0.0.1/topic".to_string();
+        assert!(create_single_notifier(&reject, NotifyType::Ntfy).is_none());
+    }
+
+    #[test]
+    fn disallowed_host_rejects_ipv4_mapped_ipv6() {
+        assert!(is_disallowed_host("::ffff:127.0.0.1"));
+        assert!(is_disallowed_host("::ffff:10.1.2.3"));
+        assert!(!is_disallowed_host("::ffff:8.8.8.8"));
+    }
+
+    #[tokio::test]
+    async fn async_url_validation_allows_public_https_ip() {
+        let result = ensure_https_public_url_async("https://8.8.8.8/hook", "webhook_url").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn async_url_validation_rejects_private_ip() {
+        let result = ensure_https_public_url_async("https://127.0.0.1/hook", "webhook_url").await;
+        assert!(result.is_err());
     }
 }

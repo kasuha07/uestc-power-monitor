@@ -9,7 +9,8 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 config = "0.15"
-sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "sqlite", "chrono"] }
+# Keep default-features off to avoid pulling unused backends (e.g. mysql) into security surface.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-native-tls", "sqlite", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 reqwest = { version = "0.12", features = ["json"] }

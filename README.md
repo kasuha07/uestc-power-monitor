@@ -94,7 +94,7 @@ cargo build --release
 | `UPM_NOTIFY__FETCH_FAILURE_ENABLED` | `notify.fetch_failure_enabled` | 是否启用获取失败通知 (true/false) |
 | `UPM_NOTIFY__NOTIFY_TYPE` | `notify.notify_type` | 单通道通知类型 (console/webhook/telegram/pushover/ntfy/email) |
 | `UPM_NOTIFY__NOTIFY_TYPES` | `notify.notify_types` | 多通道通知类型 (逗号分隔，如 "telegram,ntfy,email") |
-| `UPM_NOTIFY__WEBHOOK_URL` | `notify.webhook_url` | Webhook URL |
+| `UPM_NOTIFY__WEBHOOK_URL` | `notify.webhook_url` | Webhook URL（必须 https，且主机不能是/不能解析到 localhost 或内网 IP） |
 | `UPM_NOTIFY__TELEGRAM_BOT_TOKEN` | `notify.telegram_bot_token` | Telegram Bot Token |
 | `UPM_NOTIFY__TELEGRAM_CHAT_ID` | `notify.telegram_chat_id` | Telegram Chat ID |
 | `UPM_NOTIFY__PUSHOVER_API_TOKEN` | `notify.pushover_api_token` | Pushover App Token |
@@ -166,7 +166,7 @@ UPM_NOTIFY__NOTIFY_TYPES="telegram,ntfy,pushover"
 ### 通知渠道说明
 
 1. **Console**: 输出到控制台日志，无需额外配置
-2. **Webhook**: 发送 JSON 数据到指定 URL，需配置 `webhook_url`
+2. **Webhook**: 发送 JSON 数据到指定 URL，需配置 `webhook_url`（必须 https，且主机不能是/不能解析到 localhost 或内网 IP）
 3. **Telegram**: 通过 Telegram Bot 发送消息，需配置 `telegram_bot_token` 和 `telegram_chat_id`
 4. **Pushover**: 调用 Pushover API 发送通知，需配置 `pushover_api_token` 与 `pushover_user_key`（低余额告警固定最高优先级 `2`；其他事件使用 `pushover_priority`；`priority=2` 时还需 `pushover_retry` / `pushover_expire`）
 5. **ntfy**: 通过 ntfy Topic 推送通知，需配置 `ntfy_topic_url`（必须 https，且主机不能是/不能解析到 localhost 或内网 IP；低余额告警固定最高优先级 `5`；其他事件使用 `ntfy_priority`；可选 `ntfy_token`、tags / click / icon / actions / markdown）

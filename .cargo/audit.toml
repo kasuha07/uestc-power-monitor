@@ -1,0 +1,7 @@
+[advisories]
+ignore = [
+  # Project only uses SQLite path (`cargo tree` has no active sqlx-mysql edge),
+  # while this advisory is on `rsa` pulled by optional sqlx-mysql metadata and
+  # currently has no upstream fixed version.
+  "RUSTSEC-2023-0071",
+]
