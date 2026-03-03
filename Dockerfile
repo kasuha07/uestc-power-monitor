@@ -28,6 +28,7 @@ RUN cargo build --release
 
 # Strip debug symbols to reduce binary size by 30%+
 RUN strip target/release/uestc-power-monitor
+RUN mkdir -p /runtime/app
 
 # === Stage 4: Runtime ===
 # Use Google Distroless CC image (includes glibc/libgcc/libm)
@@ -37,7 +38,8 @@ FROM gcr.io/distroless/cc-debian12
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
 # Copy the final binary from builder stage
-COPY --from=builder /usr/src/app/target/release/uestc-power-monitor /usr/local/bin/uestc-power-monitor
+COPY --from=builder --chown=nonroot:nonroot /usr/src/app/target/release/uestc-power-monitor /usr/local/bin/uestc-power-monitor
+COPY --from=builder --chown=nonroot:nonroot /runtime/app /app
 
 # Set working directory
 WORKDIR /app
@@ -48,6 +50,9 @@ ENV UPM_TIMEZONE=Asia/Shanghai
 
 # The application looks for config.toml in the working directory
 # It can also be configured via environment variables (UPM_*)
+
+# Run as distroless non-root user
+USER nonroot:nonroot
 
 # Run the application
 CMD ["/usr/local/bin/uestc-power-monitor"]

@@ -116,7 +116,7 @@ cargo build --release
 | `UPM_NOTIFY__SMTP_PASSWORD` | `notify.smtp_password` | SMTP 密码 |
 | `UPM_NOTIFY__SMTP_FROM` | `notify.smtp_from` | 发件人地址 |
 | `UPM_NOTIFY__SMTP_TO` | `notify.smtp_to` | 收件人地址 (逗号分隔) |
-| `UPM_NOTIFY__SMTP_ENCRYPTION` | `notify.smtp_encryption` | SMTP 加密方式 (starttls/tls/none) |
+| `UPM_NOTIFY__SMTP_ENCRYPTION` | `notify.smtp_encryption` | SMTP 加密方式 (starttls/tls；不支持 none) |
 
 > `ntfy_actions` 为复杂对象数组，建议在 `config.toml` 中配置（示例见 `config.toml.example`）。
 
@@ -170,7 +170,7 @@ UPM_NOTIFY__NOTIFY_TYPES="telegram,ntfy,pushover"
 3. **Telegram**: 通过 Telegram Bot 发送消息，需配置 `telegram_bot_token` 和 `telegram_chat_id`
 4. **Pushover**: 调用 Pushover API 发送通知，需配置 `pushover_api_token` 与 `pushover_user_key`（低余额告警固定最高优先级 `2`；其他事件使用 `pushover_priority`；`priority=2` 时还需 `pushover_retry` / `pushover_expire`）
 5. **ntfy**: 通过 ntfy Topic 推送通知，需配置 `ntfy_topic_url`（必须 https，且主机不能是/不能解析到 localhost 或内网 IP；低余额告警固定最高优先级 `5`；其他事件使用 `ntfy_priority`；可选 `ntfy_token`、tags / click / icon / actions / markdown）
-6. **Email**: 通过 SMTP 发送邮件，需配置完整的 SMTP 参数（服务器、端口、认证信息等）
+6. **Email**: 通过 SMTP 发送邮件，需配置完整的 SMTP 参数（服务器、端口、认证信息等；仅支持 `starttls` / `tls`）
 
 ## 数据表结构
 

@@ -14,8 +14,7 @@ use serde_json;
 use std::collections::HashMap;
 use std::error::Error;
 use std::future::Future;
-use std::net::IpAddr;
-use std::net::ToSocketAddrs;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -265,12 +264,19 @@ pub fn create_single_notifier(
                 return None;
             }
 
-            let webhook_url = match validate_https_public_url(&config.webhook_url, "webhook_url") {
-                Some(url) => url,
-                None => return None,
-            };
+            let pinned_target =
+                match validate_https_public_url_with_pinned_dns(&config.webhook_url, "webhook_url")
+                {
+                    Some(target) => target,
+                    None => return None,
+                };
+            let webhook_url = pinned_target.url.to_string();
+            let client = create_untrusted_http_client_with_pinned_dns(
+                pinned_target.host.as_str(),
+                &pinned_target.resolved_addrs,
+            );
 
-            Some(Box::new(WebhookNotifier::new(webhook_url.to_string())))
+            Some(Box::new(WebhookNotifier::new(webhook_url, client)))
         }
         NotifyType::Telegram => {
             if config.telegram_bot_token.is_empty() || config.telegram_chat_id.is_empty() {
@@ -306,14 +312,22 @@ pub fn create_single_notifier(
                 return None;
             }
 
-            let topic_url =
-                match validate_https_public_url(&config.ntfy_topic_url, "ntfy_topic_url") {
-                    Some(url) => url,
-                    None => return None,
-                };
+            let pinned_target = match validate_https_public_url_with_pinned_dns(
+                &config.ntfy_topic_url,
+                "ntfy_topic_url",
+            ) {
+                Some(url) => url,
+                None => return None,
+            };
+            let topic_url = pinned_target.url.to_string();
+            let client = create_untrusted_http_client_with_pinned_dns(
+                pinned_target.host.as_str(),
+                &pinned_target.resolved_addrs,
+            );
 
             Some(Box::new(NtfyNotifier::new(
-                topic_url.to_string(),
+                topic_url,
+                client,
                 optional_string(&config.ntfy_token),
                 config.ntfy_priority,
                 config.ntfy_tags.clone(),
@@ -351,7 +365,16 @@ fn optional_string(value: &str) -> Option<String> {
     }
 }
 
-fn validate_https_public_url(raw_url: &str, field_name: &str) -> Option<reqwest::Url> {
+struct PinnedDnsTarget {
+    url: reqwest::Url,
+    host: String,
+    resolved_addrs: Vec<SocketAddr>,
+}
+
+fn validate_https_public_url_with_pinned_dns(
+    raw_url: &str,
+    field_name: &str,
+) -> Option<PinnedDnsTarget> {
     let url = match reqwest::Url::parse(raw_url) {
         Ok(url) => url,
         Err(_) => {
@@ -372,7 +395,7 @@ fn validate_https_public_url(raw_url: &str, field_name: &str) -> Option<reqwest:
     }
 
     let host = match url.host_str() {
-        Some(host) => host,
+        Some(host) => host.to_string(),
         None => {
             warn!(
                 "{} notifier skipped: {} must include a host",
@@ -382,7 +405,7 @@ fn validate_https_public_url(raw_url: &str, field_name: &str) -> Option<reqwest:
         }
     };
 
-    if is_disallowed_host(host) || host_resolves_to_disallowed_ip(host) {
+    if is_disallowed_host(&host) {
         warn!(
             "{} notifier skipped: {} host is not allowed",
             field_name, field_name
@@ -390,35 +413,22 @@ fn validate_https_public_url(raw_url: &str, field_name: &str) -> Option<reqwest:
         return None;
     }
 
-    Some(url)
-}
+    let resolved_addrs = match resolve_public_socket_addrs(&host, url.port_or_known_default()) {
+        Some(addrs) => addrs,
+        None => {
+            warn!(
+                "{} notifier skipped: {} host is not allowed",
+                field_name, field_name
+            );
+            return None;
+        }
+    };
 
-fn ensure_https_public_url(raw_url: &str, field_name: &str) -> Result<(), std::io::Error> {
-    match validate_https_public_url(raw_url, field_name) {
-        Some(_) => Ok(()),
-        None => Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("{} is blocked by SSRF protection", field_name),
-        )),
-    }
-}
-
-async fn ensure_https_public_url_async(
-    raw_url: &str,
-    field_name: &str,
-) -> Result<(), std::io::Error> {
-    let raw_url = raw_url.to_string();
-    let field_name_owned = field_name.to_string();
-    let field_name_for_error = field_name_owned.clone();
-    tokio::task::spawn_blocking(move || ensure_https_public_url(&raw_url, &field_name_owned))
-        .await
-        .map_err(|e| {
-            std::io::Error::other(format!(
-                "failed to validate {} in blocking task: {}",
-                field_name_for_error, e
-            ))
-        })??;
-    Ok(())
+    Some(PinnedDnsTarget {
+        url,
+        host,
+        resolved_addrs,
+    })
 }
 
 fn is_disallowed_host(host: &str) -> bool {
@@ -458,21 +468,29 @@ fn is_disallowed_host(host: &str) -> bool {
     }
 }
 
-fn host_resolves_to_disallowed_ip(host: &str) -> bool {
-    let addr = format!("{}:443", host);
-    match addr.to_socket_addrs() {
-        Ok(mut addrs) => {
-            let mut saw_any = false;
-            for socket_addr in addrs.by_ref() {
-                saw_any = true;
-                if is_disallowed_host(&socket_addr.ip().to_string()) {
-                    return true;
-                }
-            }
-            !saw_any
-        }
-        Err(_) => true,
+fn resolve_public_socket_addrs(host: &str, port: Option<u16>) -> Option<Vec<SocketAddr>> {
+    if host.parse::<IpAddr>().is_ok() {
+        return Some(Vec::new());
     }
+
+    let lookup_port = port.unwrap_or(443);
+    let addr = format!("{}:{}", host, lookup_port);
+    let resolved_addrs: Vec<SocketAddr> = match addr.to_socket_addrs() {
+        Ok(addrs) => addrs.collect(),
+        Err(_) => return None,
+    };
+
+    if resolved_addrs.is_empty() {
+        return None;
+    }
+
+    for socket_addr in &resolved_addrs {
+        if is_disallowed_host(&socket_addr.ip().to_string()) {
+            return None;
+        }
+    }
+
+    Some(resolved_addrs)
 }
 
 fn create_http_client() -> reqwest::Client {
@@ -482,10 +500,17 @@ fn create_http_client() -> reqwest::Client {
         .expect("failed to build reqwest client with timeout")
 }
 
-fn create_untrusted_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+fn create_untrusted_http_client_with_pinned_dns(
+    host: &str,
+    resolved_addrs: &[SocketAddr],
+) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    if !resolved_addrs.is_empty() {
+        builder = builder.resolve_to_addrs(host, resolved_addrs);
+    }
+    builder
         .build()
         .expect("failed to build reqwest client with strict redirect policy")
 }
@@ -548,11 +573,8 @@ pub struct WebhookNotifier {
 }
 
 impl WebhookNotifier {
-    pub fn new(url: String) -> Self {
-        Self {
-            client: create_untrusted_http_client(),
-            url,
-        }
+    pub fn new(url: String, client: reqwest::Client) -> Self {
+        Self { client, url }
     }
 }
 
@@ -570,7 +592,6 @@ impl Notifier for WebhookNotifier {
                     return Ok(()); // These events use notify_error instead
                 }
             };
-            ensure_https_public_url_async(&self.url, "webhook_url").await?;
             debug!("Sending webhook notification: event={}", event_str);
             self.client
                 .post(&self.url)
@@ -605,7 +626,6 @@ impl Notifier for WebhookNotifier {
                 "timestamp": time::now_rfc3339(),
             });
 
-            ensure_https_public_url_async(&self.url, "webhook_url").await?;
             debug!("Sending webhook error notification: event={}", event_str);
             self.client
                 .post(&self.url)
@@ -894,6 +914,7 @@ pub struct NtfyNotifier {
 impl NtfyNotifier {
     pub fn new(
         topic_url: String,
+        client: reqwest::Client,
         access_token: Option<String>,
         default_priority: u8,
         default_tags: Vec<String>,
@@ -903,7 +924,7 @@ impl NtfyNotifier {
         use_markdown: bool,
     ) -> Self {
         Self {
-            client: create_untrusted_http_client(),
+            client,
             topic_url,
             access_token,
             default_priority,
@@ -930,8 +951,6 @@ impl NtfyNotifier {
         actions: Option<&[serde_json::Value]>,
         use_markdown: bool,
     ) -> Result<(), Box<dyn Error>> {
-        ensure_https_public_url_async(&self.topic_url, "ntfy_topic_url").await?;
-
         let mut payload = serde_json::Map::new();
         payload.insert(
             "message".to_string(),
@@ -1102,13 +1121,10 @@ impl EmailNotifier {
                     .build()
             }
             crate::config::SmtpEncryption::None => {
-                AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.smtp_server)
-                    .port(config.smtp_port)
-                    .credentials(Credentials::new(
-                        config.smtp_username.clone(),
-                        config.smtp_password.clone(),
-                    ))
-                    .build()
+                return Err(
+                    "smtp_encryption=none is insecure and no longer supported; use starttls or tls"
+                        .into(),
+                );
             }
         };
 
@@ -1251,7 +1267,7 @@ impl Notifier for EmailNotifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::NotifyConfig;
+    use crate::config::{NotifyConfig, SmtpEncryption};
 
     fn base_notify_config() -> NotifyConfig {
         NotifyConfig {
@@ -1325,15 +1341,37 @@ mod tests {
         assert!(!is_disallowed_host("::ffff:8.8.8.8"));
     }
 
-    #[tokio::test]
-    async fn async_url_validation_allows_public_https_ip() {
-        let result = ensure_https_public_url_async("https://8.8.8.8/hook", "webhook_url").await;
-        assert!(result.is_ok());
+    #[test]
+    fn pinned_dns_validation_skips_override_for_ip_host() {
+        let target = validate_https_public_url_with_pinned_dns("https://8.8.8.8/hook", "webhook")
+            .expect("public HTTPS IP should be allowed");
+        assert_eq!(target.host, "8.8.8.8");
+        assert!(target.resolved_addrs.is_empty());
     }
 
-    #[tokio::test]
-    async fn async_url_validation_rejects_private_ip() {
-        let result = ensure_https_public_url_async("https://127.0.0.1/hook", "webhook_url").await;
-        assert!(result.is_err());
+    #[test]
+    fn email_notifier_rejects_plaintext_smtp_mode() {
+        let mut config = base_notify_config();
+        config.smtp_server = "smtp.example.com".to_string();
+        config.smtp_port = 587;
+        config.smtp_username = "smtp-user".to_string();
+        config.smtp_password = "smtp-pass".to_string();
+        config.smtp_from = "sender@example.com".to_string();
+        config.smtp_to = "receiver@example.com".to_string();
+        config.smtp_encryption = SmtpEncryption::None;
+
+        assert!(EmailNotifier::new(&config).is_err());
+    }
+
+    #[test]
+    fn pinned_dns_validation_allows_public_https_ip() {
+        let result = validate_https_public_url_with_pinned_dns("https://8.8.8.8/hook", "webhook");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn pinned_dns_validation_rejects_private_ip() {
+        let result = validate_https_public_url_with_pinned_dns("https://127.0.0.1/hook", "webhook");
+        assert!(result.is_none());
     }
 }

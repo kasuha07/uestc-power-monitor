@@ -73,4 +73,4 @@ smtp_username = "your_email@gmail.com"   # SMTP 用户名
 smtp_password = "your_app_password"      # SMTP 密码或应用专用密码
 smtp_from = "your_email@gmail.com"       # 发件人地址
 smtp_to = "recipient@example.com"        # 收件人地址（多个用逗号分隔）
-smtp_encryption = "starttls"             # 加密方式: starttls, tls, none
+smtp_encryption = "starttls"             # 加密方式: starttls, tls

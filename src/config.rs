@@ -94,7 +94,7 @@ pub enum SmtpEncryption {
     #[default]
     Starttls, // Port 587, STARTTLS
     Tls,  // Port 465, direct TLS
-    None, // No encryption (for testing/internal servers)
+    None, // Deprecated/insecure; parsed for compatibility but rejected at runtime
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
