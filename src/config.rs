@@ -1,5 +1,7 @@
 use config::{Config, ConfigError, Environment, File, FileFormat};
 use serde::Deserialize;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 use std::{fs, path::Path};
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Default)]
@@ -188,13 +190,52 @@ pub enum NotifyType {
 
 impl NotifyConfig {
     pub fn get_active_notify_types(&self) -> Vec<NotifyType> {
-        if !self.notify_types.is_empty() {
+        let source = if !self.notify_types.is_empty() {
             self.notify_types.clone()
         } else {
             vec![self.notify_type.clone()]
+        };
+
+        let mut unique = Vec::new();
+        for notify_type in source {
+            if !unique.contains(&notify_type) {
+                unique.push(notify_type);
+            }
+        }
+        unique
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigValidationError {
+    errors: Vec<String>,
+}
+
+impl ConfigValidationError {
+    fn new(errors: Vec<String>) -> Self {
+        Self { errors }
+    }
+}
+
+impl Display for ConfigValidationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.errors.len() == 1 {
+            write!(f, "Configuration validation failed: {}", self.errors[0])
+        } else {
+            writeln!(
+                f,
+                "Configuration validation failed with {} issue(s):",
+                self.errors.len()
+            )?;
+            for (idx, error) in self.errors.iter().enumerate() {
+                writeln!(f, "  {}. {}", idx + 1, error)?;
+            }
+            Ok(())
         }
     }
 }
+
+impl Error for ConfigValidationError {}
 
 impl AppConfig {
     pub fn new() -> Result<Self, ConfigError> {
@@ -254,6 +295,43 @@ impl AppConfig {
         }
 
         Ok(cfg)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        let mut errors = Vec::new();
+
+        if self.interval_seconds == 0 {
+            errors.push("interval_seconds must be greater than 0".to_string());
+        }
+
+        if self.database_url.trim().is_empty() {
+            errors.push("database_url cannot be empty".to_string());
+        }
+
+        if self.cookie_file.trim().is_empty() {
+            errors.push("cookie_file cannot be empty".to_string());
+        }
+
+        // Static validation only: avoid runtime/business dependency checks.
+        if self.notify.heartbeat_hour > 23 {
+            errors.push("notify.heartbeat_hour must be in range 0..=23".to_string());
+        }
+
+        if self.notify.fetch_failure_threshold == 0 {
+            errors.push("notify.fetch_failure_threshold must be greater than 0".to_string());
+        }
+
+        if self.notify.smtp_encryption == SmtpEncryption::None {
+            errors.push(
+                "notify.smtp_encryption=none is not allowed; use starttls or tls".to_string(),
+            );
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ConfigValidationError::new(errors))
+        }
     }
 }
 
@@ -337,5 +415,97 @@ mod tests {
         );
         let cfg = AppConfig::new().expect("load config");
         assert_eq!(cfg.timezone, "Asia/Tokyo");
+    }
+
+    fn valid_app_config() -> AppConfig {
+        let notify = NotifyConfig {
+            fetch_failure_threshold: default_fetch_failure_threshold(),
+            ..Default::default()
+        };
+
+        AppConfig {
+            username: Some("alice".to_string()),
+            password: Some("secret".to_string()),
+            service_url: None,
+            database_url: "sqlite://test.db".to_string(),
+            timezone: "Asia/Shanghai".to_string(),
+            login_type: LoginType::Password,
+            cookie_file: "cookies.json".to_string(),
+            interval_seconds: 600,
+            notify,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_zero_interval() {
+        let mut cfg = valid_app_config();
+        cfg.interval_seconds = 0;
+
+        let err = cfg.validate().expect_err("validation should fail");
+        assert!(err.to_string().contains("interval_seconds"));
+    }
+
+    #[test]
+    fn validate_allows_missing_password_login_credentials_for_static_validation() {
+        let mut cfg = valid_app_config();
+        cfg.username = None;
+        cfg.password = Some("   ".to_string());
+
+        cfg.validate()
+            .expect("static validation should not enforce runtime login credentials");
+    }
+
+    #[test]
+    fn validate_allows_missing_webhook_url_for_static_validation() {
+        let mut cfg = valid_app_config();
+        cfg.notify.enabled = true;
+        cfg.notify.notify_types = vec![NotifyType::Webhook];
+
+        cfg.validate()
+            .expect("static validation should not enforce runtime notifier credentials");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_heartbeat_hour() {
+        let mut cfg = valid_app_config();
+        cfg.notify.heartbeat_hour = 24;
+
+        let err = cfg.validate().expect_err("validation should fail");
+        assert!(err.to_string().contains("notify.heartbeat_hour"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_fetch_failure_threshold() {
+        let mut cfg = valid_app_config();
+        cfg.notify.fetch_failure_threshold = 0;
+
+        let err = cfg.validate().expect_err("validation should fail");
+        assert!(err.to_string().contains("notify.fetch_failure_threshold"));
+    }
+
+    #[test]
+    fn validate_rejects_insecure_smtp_encryption_mode() {
+        let mut cfg = valid_app_config();
+        cfg.notify.smtp_encryption = SmtpEncryption::None;
+
+        let err = cfg.validate().expect_err("validation should fail");
+        assert!(err.to_string().contains("notify.smtp_encryption=none"));
+    }
+
+    #[test]
+    fn active_notify_types_are_deduplicated_preserving_order() {
+        let mut notify = NotifyConfig::default();
+        notify.notify_types = vec![
+            NotifyType::Telegram,
+            NotifyType::Webhook,
+            NotifyType::Telegram,
+            NotifyType::Webhook,
+            NotifyType::Email,
+        ];
+
+        assert_eq!(
+            notify.get_active_notify_types(),
+            vec![NotifyType::Telegram, NotifyType::Webhook, NotifyType::Email]
+        );
     }
 }

@@ -177,13 +177,13 @@ pub struct PowerInfo {
     pub message: String,
 
     /// sydl: 剩余电量 (Remaining Energy - kWh)
-    /// 注意：原JSON中是字符串类型 ("26.91")，自动转换为 f64
-    #[serde(rename = "sydl", deserialize_with = "deserialize_f64_from_str")]
+    /// 兼容字符串和数字类型（例如 "26.91" 或 26.91）
+    #[serde(rename = "sydl", deserialize_with = "deserialize_f64_lossy")]
     pub remaining_energy: f64,
 
     /// syje: 剩余金额 (Remaining Money - CNY)
-    /// 注意：原JSON中是字符串类型 ("14.44")，自动转换为 f64
-    #[serde(rename = "syje", deserialize_with = "deserialize_f64_from_str")]
+    /// 兼容字符串和数字类型（例如 "14.44" 或 14.44）
+    #[serde(rename = "syje", deserialize_with = "deserialize_f64_lossy")]
     pub remaining_money: f64,
 
     /// dffjbh: 控电房间编号 (Meter Room ID for Utility System)
@@ -211,12 +211,21 @@ pub struct PowerInfo {
     pub room_number: String,
 }
 
-fn deserialize_f64_from_str<'de, D>(deserializer: D) -> Result<f64, D::Error>
+fn deserialize_f64_lossy<'de, D>(deserializer: D) -> Result<f64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let s: String = serde::Deserialize::deserialize(deserializer)?;
-    s.parse::<f64>().map_err(serde::de::Error::custom)
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumberOrString {
+        Number(f64),
+        String(String),
+    }
+
+    match NumberOrString::deserialize(deserializer)? {
+        NumberOrString::Number(n) => Ok(n),
+        NumberOrString::String(s) => s.trim().parse::<f64>().map_err(serde::de::Error::custom),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,4 +243,60 @@ pub struct ApiResponse<T> {
 #[derive(Debug, Deserialize)]
 struct SessionCheckResponse {
     success: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_json_with_values(sydl: &str, syje: &str) -> String {
+        format!(
+            r#"{{
+                "e": 0,
+                "m": "ok",
+                "d": {{
+                    "retcode": 0,
+                    "msg": "ok",
+                    "sydl": {},
+                    "syje": {},
+                    "dffjbh": "meter-room-id",
+                    "roomName": "220407",
+                    "roomId": "room-id",
+                    "buiId": "building-id",
+                    "areaid": "campus-id",
+                    "fjh": "407"
+                }}
+            }}"#,
+            sydl, syje
+        )
+    }
+
+    #[test]
+    fn power_info_deserializes_numeric_strings() {
+        let json = sample_json_with_values(r#""26.91""#, r#""14.44""#);
+        let resp: ApiResponse<PowerInfo> = serde_json::from_str(&json).expect("parse response");
+        let data = resp.data.expect("response data should exist");
+        assert!((data.remaining_energy - 26.91).abs() < f64::EPSILON);
+        assert!((data.remaining_money - 14.44).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn power_info_deserializes_numeric_values() {
+        let json = sample_json_with_values("26.91", "14.44");
+        let resp: ApiResponse<PowerInfo> = serde_json::from_str(&json).expect("parse response");
+        let data = resp.data.expect("response data should exist");
+        assert!((data.remaining_energy - 26.91).abs() < f64::EPSILON);
+        assert!((data.remaining_money - 14.44).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn power_info_rejects_non_numeric_values() {
+        let json = sample_json_with_values(r#""abc""#, r#""14.44""#);
+        let err = serde_json::from_str::<ApiResponse<PowerInfo>>(&json).expect_err("should fail");
+        assert!(
+            err.to_string().contains("invalid float literal"),
+            "unexpected error: {}",
+            err
+        );
+    }
 }

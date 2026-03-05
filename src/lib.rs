@@ -25,6 +25,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    if let Err(e) = config.validate() {
+        error!("{}", e);
+        return Err(Box::new(e));
+    }
+
     let configured_timezone = config.timezone.trim();
     if let Err(e) = crate::time::set_timezone(configured_timezone) {
         warn!(
@@ -82,6 +87,19 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.interval_seconds
     );
 
+    #[cfg(unix)]
+    let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    {
+        Ok(stream) => Some(stream),
+        Err(e) => {
+            warn!(
+                "Failed to setup SIGTERM handler: {}. SIGINT (Ctrl+C) shutdown remains available.",
+                e
+            );
+            None
+        }
+    };
+
     // main loop
     loop {
         tokio::select! {
@@ -92,14 +110,18 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             _ = async {
                 #[cfg(unix)]
                 {
-                    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                        .expect("Failed to setup SIGTERM handler");
-                    sigterm.recv().await
+                    match &mut sigterm {
+                        Some(stream) => {
+                            let _ = stream.recv().await;
+                        }
+                        None => {
+                            std::future::pending::<()>().await;
+                        }
+                    }
                 }
                 #[cfg(not(unix))]
                 {
                     std::future::pending::<()>().await;
-                    Some(())
                 }
             } => {
                 info!("Received SIGTERM, shutting down gracefully...");
