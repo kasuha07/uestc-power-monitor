@@ -112,6 +112,8 @@ pub struct NotifyConfig {
     #[serde(default = "default_heartbeat_hour")]
     pub heartbeat_hour: u32,
     #[serde(default)]
+    pub startup_enabled: bool,
+    #[serde(default)]
     pub login_failure_enabled: bool,
     #[serde(default)]
     pub fetch_failure_enabled: bool,

@@ -23,6 +23,7 @@ use tracing::{debug, error, info, warn};
 pub enum NotificationEvent {
     LowBalance,
     Heartbeat,
+    Startup,
     LoginFailure,
     ConsecutiveFetchFailures,
 }
@@ -35,6 +36,7 @@ pub struct NotificationManager {
     last_balance: Option<f64>,
     consecutive_fetch_failures: u32,
     last_fetch_failure_notify_time: Option<chrono::DateTime<Tz>>,
+    startup_notified: bool,
 }
 
 impl NotificationManager {
@@ -66,6 +68,7 @@ impl NotificationManager {
             last_balance: None,
             consecutive_fetch_failures: 0,
             last_fetch_failure_notify_time: None,
+            startup_notified: false,
         })
     }
 
@@ -98,6 +101,13 @@ impl NotificationManager {
     pub async fn check_and_notify(&mut self, data: &PowerInfo) {
         let now = time::now();
         debug!("Checking notification conditions at {}", now);
+
+        if self.config.enabled && self.config.startup_enabled && !self.startup_notified {
+            info!("Sending startup notification...");
+            self.notify_all(data, NotificationEvent::Startup).await;
+            self.startup_notified = true;
+            debug!("Startup notification sent successfully");
+        }
 
         // Heartbeat Check
         if self.config.enabled && self.config.heartbeat_enabled {
@@ -537,6 +547,12 @@ impl Notifier for ConsoleNotifier {
                         info.room_display_name, info.remaining_money, info.remaining_energy
                     );
                 }
+                NotificationEvent::Startup => {
+                    info!(
+                        "UESTC Power Monitor 🚀 [Startup] Room: {}, Money: {:.2} CNY, Energy: {:.2} kWh",
+                        info.room_display_name, info.remaining_money, info.remaining_energy
+                    );
+                }
                 NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
                     // These events use notify_error instead
                 }
@@ -558,7 +574,9 @@ impl Notifier for ConsoleNotifier {
                 NotificationEvent::ConsecutiveFetchFailures => {
                     error!("UESTC Power Monitor ❌ [Fetch Failures] {}", error_msg);
                 }
-                NotificationEvent::LowBalance | NotificationEvent::Heartbeat => {
+                NotificationEvent::LowBalance
+                | NotificationEvent::Heartbeat
+                | NotificationEvent::Startup => {
                     // These events use notify instead
                 }
             }
@@ -588,6 +606,7 @@ impl Notifier for WebhookNotifier {
             let event_str = match event {
                 NotificationEvent::LowBalance => "low_balance",
                 NotificationEvent::Heartbeat => "heartbeat",
+                NotificationEvent::Startup => "startup",
                 NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
                     return Ok(()); // These events use notify_error instead
                 }
@@ -614,7 +633,9 @@ impl Notifier for WebhookNotifier {
             let event_str = match event {
                 NotificationEvent::LoginFailure => "login_failure",
                 NotificationEvent::ConsecutiveFetchFailures => "consecutive_fetch_failures",
-                NotificationEvent::LowBalance | NotificationEvent::Heartbeat => {
+                NotificationEvent::LowBalance
+                | NotificationEvent::Heartbeat
+                | NotificationEvent::Startup => {
                     return Ok(()); // These events use notify instead
                 }
             };
@@ -666,6 +687,7 @@ impl Notifier for TelegramNotifier {
             let title = match event {
                 NotificationEvent::LowBalance => "⚠️ [Low Power Warning]",
                 NotificationEvent::Heartbeat => "ℹ️ [Daily Report]",
+                NotificationEvent::Startup => "🚀 [Startup]",
                 NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
                     return Ok(()); // These events use notify_error instead
                 }
@@ -700,7 +722,9 @@ impl Notifier for TelegramNotifier {
             let title = match event {
                 NotificationEvent::LoginFailure => "🔐 [Login Failure]",
                 NotificationEvent::ConsecutiveFetchFailures => "❌ [Fetch Failures]",
-                NotificationEvent::LowBalance | NotificationEvent::Heartbeat => {
+                NotificationEvent::LowBalance
+                | NotificationEvent::Heartbeat
+                | NotificationEvent::Startup => {
                     return Ok(()); // These events use notify instead
                 }
             };
@@ -748,6 +772,16 @@ fn build_power_notification(
                 time::now_display()
             ),
         )),
+        NotificationEvent::Startup => Some((
+            "🚀 UESTC Power Monitor - Startup".to_string(),
+            format!(
+                "Service started successfully.\nRoom: {}\nMoney: {:.2} CNY\nEnergy: {:.2} kWh\nTime: {}",
+                info.room_display_name,
+                info.remaining_money,
+                info.remaining_energy,
+                time::now_display()
+            ),
+        )),
         NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => None,
     }
 }
@@ -762,7 +796,9 @@ fn build_error_notification(error_msg: &str, event: NotificationEvent) -> Option
             "❌ UESTC Power Monitor - Fetch Failures".to_string(),
             format!("{}\nTime: {}", error_msg, time::now_display()),
         )),
-        NotificationEvent::LowBalance | NotificationEvent::Heartbeat => None,
+        NotificationEvent::LowBalance
+        | NotificationEvent::Heartbeat
+        | NotificationEvent::Startup => None,
     }
 }
 
@@ -1197,6 +1233,24 @@ impl Notifier for EmailNotifier {
                     );
                     (subject, body)
                 }
+                NotificationEvent::Startup => {
+                    let subject = "🚀 UESTC Power Monitor - Startup";
+                    let body = format!(
+                        "UESTC Power Monitor - Startup\n\
+                        \n\
+                        Service started successfully.\n\
+                        Room: {}\n\
+                        Remaining Money: {:.2} CNY\n\
+                        Remaining Energy: {:.2} kWh\n\
+                        \n\
+                        Time: {}",
+                        info.room_display_name,
+                        info.remaining_money,
+                        info.remaining_energy,
+                        time::now_display()
+                    );
+                    (subject, body)
+                }
                 NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
                     return Ok(()); // These events use notify_error instead
                 }
@@ -1251,7 +1305,9 @@ impl Notifier for EmailNotifier {
                     );
                     (subject, body)
                 }
-                NotificationEvent::LowBalance | NotificationEvent::Heartbeat => {
+                NotificationEvent::LowBalance
+                | NotificationEvent::Heartbeat
+                | NotificationEvent::Startup => {
                     return Ok(()); // These events use notify instead
                 }
             };

@@ -13,6 +13,7 @@
 - **SQLite 持久化**：每次采样写入 `power_records`，便于后续统计分析。
 - **多事件通知**：
   - 低余额告警
+  - 启动通知
   - 每日心跳
   - 登录失败告警
   - 连续拉取失败告警
@@ -132,6 +133,7 @@ docker compose up -d --build
 | `notify.enabled` | 是否启用通知 | `false` |
 | `notify.threshold` | 低余额阈值（元） | `5.0` |
 | `notify.cooldown_minutes` | 低余额重复提醒冷却（分钟） | `520` |
+| `notify.startup_enabled` | 启动通知开关 | `false` |
 | `notify.heartbeat_enabled` | 每日心跳开关 | `false` |
 | `notify.heartbeat_hour` | 每日心跳小时（0-23） | `9` |
 
@@ -145,6 +147,7 @@ UPM_PASSWORD=your_password
 UPM_DATABASE_URL=sqlite://data/power_monitor.db
 UPM_TIMEZONE=Asia/Shanghai
 UPM_NOTIFY__ENABLED=true
+UPM_NOTIFY__STARTUP_ENABLED=true
 UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 ```
 
@@ -166,6 +169,7 @@ UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 ### 事件类型
 
 - **LowBalance**：余额低于阈值时触发（支持冷却与边沿触发逻辑）
+- **Startup**：服务启动后首次成功拉取时触发
 - **Heartbeat**：每天指定小时发送一次状态心跳
 - **LoginFailure**：启动登录失败时发送
 - **ConsecutiveFetchFailures**：连续抓取失败达到阈值后发送
