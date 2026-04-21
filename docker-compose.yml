@@ -1,25 +1,29 @@
 services:
   app:
-    # Use pre-built image from GitHub Container Registry
-    image: ghcr.io/kasuha07/uestc-power-monitor:latest
-    # Or build locally (uncomment the line below and comment out the image line above)
-    # build: .
+    # 默认使用本地源码构建，确保包含当前仓库里的修复。
+    build: .
+    # 如果你确认要使用已发布镜像，可改成下面这行并注释掉 build：
+    # image: ghcr.io/kasuha07/uestc-power-monitor:latest
+
     container_name: uestc-power-monitor
     restart: unless-stopped
+
     volumes:
-      # Mount local configuration file
-      - ./config.toml:/app/config.toml
-      # Mount data directory for SQLite database persistence
+      # 本地配置文件（建议先 cp config.toml.example config.toml）
+      - ./config.toml:/app/config.toml:ro
+      # SQLite 数据库和 Cookie 持久化目录
       - ./data:/app/data
+
     environment:
-      # Timezone configuration
-      - TZ=Asia/Shanghai
-      - UPM_TIMEZONE=Asia/Shanghai
-      # Override database URL to use persistent volume
-      - UPM_DATABASE_URL=sqlite://data/power_monitor.db
-      # You can set credentials here or in config.toml
-      # - UPM_USERNAME=your_student_id
-      # - UPM_PASSWORD=your_password
-      # Proxy settings (uncomment if needed)
-      # - HTTPS_PROXY=http://proxy.example.com:8080
-      # - HTTP_PROXY=http://proxy.example.com:8080
+      TZ: Asia/Shanghai
+      UPM_TIMEZONE: Asia/Shanghai
+      UPM_DATABASE_URL: sqlite://data/power_monitor.db
+      UPM_COOKIE_FILE: data/uestc_cookies.json
+
+      # 如果你不想把账号密码写进 config.toml，也可以取消下面两行注释：
+      # UPM_USERNAME: "2023xxxxxxx"
+      # UPM_PASSWORD: "your_password"
+
+      # 如需代理可取消注释：
+      # HTTPS_PROXY: http://proxy.example.com:8080
+      # HTTP_PROXY: http://proxy.example.com:8080

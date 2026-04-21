@@ -283,9 +283,12 @@ impl AppConfig {
         // This source is added last, so it overrides Secrets and Config File.
         builder = builder.add_source(
             Environment::with_prefix("UPM")
+                .prefix_separator("_")
                 .try_parsing(true)
                 .separator("__")
-                .list_separator(","),
+                .list_separator(",")
+                .with_list_parse_key("notify.notify_types")
+                .with_list_parse_key("notify.ntfy_tags"),
         );
 
         let mut cfg: AppConfig = builder.build()?.try_deserialize()?;
@@ -417,6 +420,58 @@ mod tests {
         );
         let cfg = AppConfig::new().expect("load config");
         assert_eq!(cfg.timezone, "Asia/Tokyo");
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            // SAFETY: test code runs under a global mutex to avoid concurrent env writes.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => {
+                    // SAFETY: test code runs under a global mutex to avoid concurrent env writes.
+                    unsafe { std::env::set_var(self.key, value) };
+                }
+                None => {
+                    // SAFETY: test code runs under a global mutex to avoid concurrent env writes.
+                    unsafe { std::env::remove_var(self.key) };
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn env_database_url_and_nested_notify_fields_load_with_upm_prefix() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock config test mutex");
+        let _guard = setup_test_config("", None);
+        let _db_guard = EnvVarGuard::set("UPM_DATABASE_URL", "sqlite://env.db");
+        let _notify_guard = EnvVarGuard::set("UPM_NOTIFY__ENABLED", "true");
+        let _notify_types_guard = EnvVarGuard::set("UPM_NOTIFY__NOTIFY_TYPES", "telegram,ntfy");
+        let _ntfy_tags_guard = EnvVarGuard::set("UPM_NOTIFY__NTFY_TAGS", "warning,zap");
+
+        let cfg = AppConfig::new().expect("load config from env");
+
+        assert_eq!(cfg.database_url, "sqlite://env.db");
+        assert!(cfg.notify.enabled);
+        assert_eq!(
+            cfg.notify.notify_types,
+            vec![NotifyType::Telegram, NotifyType::Ntfy]
+        );
+        assert_eq!(
+            cfg.notify.ntfy_tags,
+            vec!["warning".to_string(), "zap".to_string()]
+        );
     }
 
     fn valid_app_config() -> AppConfig {
