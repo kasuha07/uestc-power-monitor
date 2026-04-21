@@ -23,7 +23,7 @@ enabled = true            # 是否启用通知
 threshold = 5.0          # 余额报警阈值（元）
 cooldown_minutes = 520    # 报警冷却时间（分钟）
 heartbeat_enabled = true  # 是否启用每日心跳通知
-heartbeat_hour = 9        # 每日心跳通知时间（0-23）
+heartbeat_hours = [9]     # 每日心跳通知时间（0-23，支持单值或数组；兼容 heartbeat_hour）
 startup_enabled = true    # 是否启用启动通知（首次成功拉取后发送一次）
 
 # 登录失败通知

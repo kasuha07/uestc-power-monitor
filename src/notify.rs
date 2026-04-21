@@ -32,7 +32,7 @@ pub struct NotificationManager {
     config: NotifyConfig,
     notifiers: Vec<Box<dyn Notifier>>,
     last_low_balance_notify_time: Option<chrono::DateTime<Tz>>,
-    last_heartbeat_date: Option<chrono::NaiveDate>,
+    last_heartbeat_slot: Option<(chrono::NaiveDate, u32)>,
     last_balance: Option<f64>,
     consecutive_fetch_failures: u32,
     last_fetch_failure_notify_time: Option<chrono::DateTime<Tz>>,
@@ -64,7 +64,7 @@ impl NotificationManager {
             config,
             notifiers,
             last_low_balance_notify_time: None,
-            last_heartbeat_date: None,
+            last_heartbeat_slot: None,
             last_balance: None,
             consecutive_fetch_failures: 0,
             last_fetch_failure_notify_time: None,
@@ -112,21 +112,28 @@ impl NotificationManager {
         // Heartbeat Check
         if self.config.enabled && self.config.heartbeat_enabled {
             debug!("Heartbeat enabled, checking conditions...");
-            if now.hour() == self.config.heartbeat_hour {
-                let today = now.date_naive();
-                if self.last_heartbeat_date != Some(today) {
+            if let Some(target_hour) = self
+                .config
+                .heartbeat_hours
+                .as_slice()
+                .iter()
+                .copied()
+                .find(|&hour| now.hour() == hour)
+            {
+                let slot = (now.date_naive(), target_hour);
+                if self.last_heartbeat_slot != Some(slot) {
                     info!("Sending daily heartbeat...");
                     self.notify_all(data, NotificationEvent::Heartbeat).await;
-                    self.last_heartbeat_date = Some(today);
+                    self.last_heartbeat_slot = Some(slot);
                     debug!("Heartbeat sent successfully");
                 } else {
-                    debug!("Heartbeat already sent today");
+                    debug!("Heartbeat already sent for today's {}:00 slot", target_hour);
                 }
             } else {
                 debug!(
-                    "Not heartbeat hour yet (current: {}, target: {})",
+                    "Not heartbeat hour yet (current: {}, targets: {:?})",
                     now.hour(),
-                    self.config.heartbeat_hour
+                    self.config.heartbeat_hours.as_slice()
                 );
             }
         }

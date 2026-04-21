@@ -1,5 +1,6 @@
 use config::{Config, ConfigError, Environment, File, FileFormat};
 use serde::Deserialize;
+use serde::de::{self, SeqAccess, Unexpected, Visitor};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::{fs, path::Path};
@@ -52,6 +53,161 @@ fn default_cooldown_minutes() -> u64 {
 
 fn default_heartbeat_hour() -> u32 {
     9 // 9:00 AM
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeartbeatHours(Vec<u32>);
+
+impl Default for HeartbeatHours {
+    fn default() -> Self {
+        Self(vec![default_heartbeat_hour()])
+    }
+}
+
+impl HeartbeatHours {
+    pub fn as_slice(&self) -> &[u32] {
+        &self.0
+    }
+
+    pub fn contains(&self, hour: u32) -> bool {
+        self.0.contains(&hour)
+    }
+}
+
+fn dedup_hours(hours: Vec<u32>) -> Vec<u32> {
+    let mut unique = Vec::new();
+    for hour in hours {
+        if !unique.contains(&hour) {
+            unique.push(hour);
+        }
+    }
+    unique
+}
+
+fn parse_heartbeat_hours<E>(value: &str) -> Result<Vec<u32>, E>
+where
+    E: de::Error,
+{
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(E::custom("heartbeat hour list cannot be empty"));
+    }
+
+    let content = if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+
+    let mut hours = Vec::new();
+    for part in content.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err(E::custom("heartbeat hour entries cannot be empty"));
+        }
+
+        let hour = part.parse::<u32>().map_err(|_| {
+            E::custom(format!(
+                "invalid heartbeat hour '{}', expected integer(s) in range 0..=23",
+                part
+            ))
+        })?;
+        hours.push(hour);
+    }
+
+    if hours.is_empty() {
+        return Err(E::custom("heartbeat hour list cannot be empty"));
+    }
+
+    Ok(dedup_hours(hours))
+}
+
+impl<'de> Deserialize<'de> for HeartbeatHours {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum HourValue {
+            Number(u32),
+            Text(String),
+        }
+
+        struct HeartbeatHoursVisitor;
+
+        impl<'de> Visitor<'de> for HeartbeatHoursVisitor {
+            type Value = HeartbeatHours;
+
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+                formatter
+                    .write_str("a single hour, a comma-separated hour list, or an array of hours")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let hour = u32::try_from(value).map_err(|_| {
+                    E::invalid_value(
+                        Unexpected::Unsigned(value),
+                        &"a 32-bit unsigned integer in range 0..=23",
+                    )
+                })?;
+                Ok(HeartbeatHours(vec![hour]))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value < 0 {
+                    return Err(E::invalid_value(
+                        Unexpected::Signed(value),
+                        &"a non-negative integer in range 0..=23",
+                    ));
+                }
+                self.visit_u64(value as u64)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(HeartbeatHours(parse_heartbeat_hours::<E>(value)?))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut hours = Vec::new();
+                while let Some(value) = seq.next_element::<HourValue>()? {
+                    match value {
+                        HourValue::Number(hour) => hours.push(hour),
+                        HourValue::Text(text) => {
+                            hours.extend(parse_heartbeat_hours::<A::Error>(&text)?);
+                        }
+                    }
+                }
+
+                if hours.is_empty() {
+                    return Err(de::Error::custom("heartbeat hour list cannot be empty"));
+                }
+
+                Ok(HeartbeatHours(dedup_hours(hours)))
+            }
+        }
+
+        deserializer.deserialize_any(HeartbeatHoursVisitor)
+    }
 }
 
 fn default_fetch_failure_threshold() -> u32 {
@@ -109,8 +265,8 @@ pub struct NotifyConfig {
     pub cooldown_minutes: u64,
     #[serde(default)]
     pub heartbeat_enabled: bool,
-    #[serde(default = "default_heartbeat_hour")]
-    pub heartbeat_hour: u32,
+    #[serde(default, alias = "heartbeat_hour")]
+    pub heartbeat_hours: HeartbeatHours,
     #[serde(default)]
     pub startup_enabled: bool,
     #[serde(default)]
@@ -318,8 +474,17 @@ impl AppConfig {
         }
 
         // Static validation only: avoid runtime/business dependency checks.
-        if self.notify.heartbeat_hour > 23 {
-            errors.push("notify.heartbeat_hour must be in range 0..=23".to_string());
+        if self
+            .notify
+            .heartbeat_hours
+            .as_slice()
+            .iter()
+            .any(|&hour| hour > 23)
+        {
+            errors.push(
+                "notify.heartbeat_hours / notify.heartbeat_hour must contain only values in range 0..=23"
+                    .to_string(),
+            );
         }
 
         if self.notify.fetch_failure_threshold == 0 {
@@ -459,6 +624,7 @@ mod tests {
         let _notify_guard = EnvVarGuard::set("UPM_NOTIFY__ENABLED", "true");
         let _notify_types_guard = EnvVarGuard::set("UPM_NOTIFY__NOTIFY_TYPES", "telegram,ntfy");
         let _ntfy_tags_guard = EnvVarGuard::set("UPM_NOTIFY__NTFY_TAGS", "warning,zap");
+        let _heartbeat_hours_guard = EnvVarGuard::set("UPM_NOTIFY__HEARTBEAT_HOURS", "9,21");
 
         let cfg = AppConfig::new().expect("load config from env");
 
@@ -472,6 +638,41 @@ mod tests {
             cfg.notify.ntfy_tags,
             vec!["warning".to_string(), "zap".to_string()]
         );
+        assert_eq!(cfg.notify.heartbeat_hours.as_slice(), &[9, 21]);
+    }
+
+    #[test]
+    fn heartbeat_hours_support_single_value_and_array_aliases() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock config test mutex");
+        let _guard = setup_test_config(
+            r#"
+database_url = "sqlite://test.db"
+
+[notify]
+heartbeat_hour = [9, 21, 9]
+"#,
+            None,
+        );
+
+        let cfg = AppConfig::new().expect("load config");
+        assert_eq!(cfg.notify.heartbeat_hours.as_slice(), &[9, 21]);
+    }
+
+    #[test]
+    fn heartbeat_hours_support_plural_key() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock config test mutex");
+        let _guard = setup_test_config(
+            r#"
+database_url = "sqlite://test.db"
+
+[notify]
+heartbeat_hours = 8
+"#,
+            None,
+        );
+
+        let cfg = AppConfig::new().expect("load config");
+        assert_eq!(cfg.notify.heartbeat_hours.as_slice(), &[8]);
     }
 
     fn valid_app_config() -> AppConfig {
@@ -525,10 +726,10 @@ mod tests {
     #[test]
     fn validate_rejects_invalid_heartbeat_hour() {
         let mut cfg = valid_app_config();
-        cfg.notify.heartbeat_hour = 24;
+        cfg.notify.heartbeat_hours = HeartbeatHours(vec![9, 24]);
 
         let err = cfg.validate().expect_err("validation should fail");
-        assert!(err.to_string().contains("notify.heartbeat_hour"));
+        assert!(err.to_string().contains("notify.heartbeat_hours"));
     }
 
     #[test]

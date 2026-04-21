@@ -135,7 +135,7 @@ docker compose up -d --build
 | `notify.cooldown_minutes` | 低余额重复提醒冷却（分钟） | `520` |
 | `notify.startup_enabled` | 启动通知开关 | `false` |
 | `notify.heartbeat_enabled` | 每日心跳开关 | `false` |
-| `notify.heartbeat_hour` | 每日心跳小时（0-23） | `9` |
+| `notify.heartbeat_hours` | 每日心跳小时（0-23，支持单值或数组，兼容 `heartbeat_hour`） | `[9]` |
 
 完整配置请直接参考：`config.toml.example`。
 
@@ -170,7 +170,7 @@ UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 
 - **LowBalance**：余额低于阈值时触发（支持冷却与边沿触发逻辑）
 - **Startup**：服务启动后首次成功拉取时触发
-- **Heartbeat**：每天指定小时发送一次状态心跳
+- **Heartbeat**：每天在一个或多个指定小时发送状态心跳
 - **LoginFailure**：启动登录失败时发送
 - **ConsecutiveFetchFailures**：连续抓取失败达到阈值后发送
 
