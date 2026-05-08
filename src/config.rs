@@ -218,6 +218,22 @@ fn default_fetch_failure_cooldown_minutes() -> u64 {
     60 // 1 hour
 }
 
+fn default_notify_retry_attempts() -> u32 {
+    3
+}
+
+fn default_notify_retry_initial_delay_seconds() -> u64 {
+    2
+}
+
+fn default_notify_retry_max_delay_seconds() -> u64 {
+    60
+}
+
+fn default_notify_request_timeout_seconds() -> u64 {
+    15
+}
+
 fn default_pushover_priority() -> i8 {
     0
 }
@@ -255,7 +271,7 @@ pub enum SmtpEncryption {
     None, // Deprecated/insecure; parsed for compatibility but rejected at runtime
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct NotifyConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -277,6 +293,14 @@ pub struct NotifyConfig {
     pub fetch_failure_threshold: u32,
     #[serde(default = "default_fetch_failure_cooldown_minutes")]
     pub fetch_failure_cooldown_minutes: u64,
+    #[serde(default = "default_notify_retry_attempts")]
+    pub retry_attempts: u32,
+    #[serde(default = "default_notify_retry_initial_delay_seconds")]
+    pub retry_initial_delay_seconds: u64,
+    #[serde(default = "default_notify_retry_max_delay_seconds")]
+    pub retry_max_delay_seconds: u64,
+    #[serde(default = "default_notify_request_timeout_seconds")]
+    pub request_timeout_seconds: u64,
     #[serde(default)]
     pub notify_type: NotifyType, // Keep for backward compatibility
     #[serde(default)]
@@ -332,6 +356,53 @@ pub struct NotifyConfig {
     pub smtp_to: String, // Comma-separated list of recipients
     #[serde(default = "default_smtp_encryption")]
     pub smtp_encryption: SmtpEncryption,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: default_threshold(),
+            cooldown_minutes: default_cooldown_minutes(),
+            heartbeat_enabled: false,
+            heartbeat_hours: HeartbeatHours::default(),
+            startup_enabled: false,
+            login_failure_enabled: false,
+            fetch_failure_enabled: false,
+            fetch_failure_threshold: default_fetch_failure_threshold(),
+            fetch_failure_cooldown_minutes: default_fetch_failure_cooldown_minutes(),
+            retry_attempts: default_notify_retry_attempts(),
+            retry_initial_delay_seconds: default_notify_retry_initial_delay_seconds(),
+            retry_max_delay_seconds: default_notify_retry_max_delay_seconds(),
+            request_timeout_seconds: default_notify_request_timeout_seconds(),
+            notify_type: NotifyType::default(),
+            notify_types: Vec::new(),
+            webhook_url: String::new(),
+            telegram_bot_token: String::new(),
+            telegram_chat_id: String::new(),
+            pushover_api_token: String::new(),
+            pushover_user_key: String::new(),
+            pushover_priority: default_pushover_priority(),
+            pushover_retry: default_pushover_retry(),
+            pushover_expire: default_pushover_expire(),
+            pushover_url: String::new(),
+            ntfy_topic_url: String::new(),
+            ntfy_token: String::new(),
+            ntfy_priority: default_ntfy_priority(),
+            ntfy_tags: Vec::new(),
+            ntfy_click_action: String::new(),
+            ntfy_icon: String::new(),
+            ntfy_actions: Vec::new(),
+            ntfy_use_markdown: default_ntfy_use_markdown(),
+            smtp_server: String::new(),
+            smtp_port: default_smtp_port(),
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+            smtp_from: String::new(),
+            smtp_to: String::new(),
+            smtp_encryption: default_smtp_encryption(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -489,6 +560,22 @@ impl AppConfig {
 
         if self.notify.fetch_failure_threshold == 0 {
             errors.push("notify.fetch_failure_threshold must be greater than 0".to_string());
+        }
+
+        if self.notify.retry_attempts == 0 {
+            errors.push("notify.retry_attempts must be greater than 0".to_string());
+        }
+
+        if self.notify.retry_initial_delay_seconds == 0 {
+            errors.push("notify.retry_initial_delay_seconds must be greater than 0".to_string());
+        }
+
+        if self.notify.retry_max_delay_seconds == 0 {
+            errors.push("notify.retry_max_delay_seconds must be greater than 0".to_string());
+        }
+
+        if self.notify.request_timeout_seconds == 0 {
+            errors.push("notify.request_timeout_seconds must be greater than 0".to_string());
         }
 
         if self.notify.smtp_encryption == SmtpEncryption::None {

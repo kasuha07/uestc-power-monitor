@@ -34,6 +34,12 @@ fetch_failure_enabled = true  # 是否启用连续获取数据失败通知
 fetch_failure_threshold = 3   # 连续失败次数阈值（默认3次）
 fetch_failure_cooldown_minutes = 60  # 失败通知冷却时间（分钟，默认60分钟）
 
+# 通知可靠性设置
+retry_attempts = 3                 # 每个通知通道的最大尝试次数（默认3次）
+retry_initial_delay_seconds = 2    # 首次失败后的退避等待秒数（默认2秒）
+retry_max_delay_seconds = 60       # 指数退避最大等待秒数（默认60秒）
+request_timeout_seconds = 15       # 单次通知请求/SMTP发送超时时间（默认15秒）
+
 # 单通道通知（向后兼容）
 notify_type = "console"  # 通知类型: console, webhook, telegram, pushover, ntfy, email
 

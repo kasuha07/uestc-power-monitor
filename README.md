@@ -136,6 +136,10 @@ docker compose up -d --build
 | `notify.startup_enabled` | 启动通知开关 | `false` |
 | `notify.heartbeat_enabled` | 每日心跳开关 | `false` |
 | `notify.heartbeat_hours` | 每日心跳小时（0-23，支持单值或数组，兼容 `heartbeat_hour`） | `[9]` |
+| `notify.retry_attempts` | 每个通知通道最大尝试次数 | `3` |
+| `notify.retry_initial_delay_seconds` | 通知失败后的首次退避等待秒数 | `2` |
+| `notify.retry_max_delay_seconds` | 通知指数退避最大等待秒数 | `60` |
+| `notify.request_timeout_seconds` | 单次通知请求/SMTP 发送超时秒数 | `15` |
 
 完整配置请直接参考：`config.toml.example`。
 
@@ -187,6 +191,12 @@ UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 
 - `notify_type`（单通道，向后兼容）
 - `notify_types`（多通道，优先级更高）
+
+可靠性行为：
+
+- 每个通道独立重试，使用指数退避并限制最大退避时间
+- 单次通知发送有超时保护，避免某个通道长期阻塞
+- 仅当至少一个通道发送成功时才会消耗启动/心跳/低余额/连续失败通知状态；全部失败时会在后续轮询继续尝试
 
 ### 安全限制（Webhook / ntfy）
 

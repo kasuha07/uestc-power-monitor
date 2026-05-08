@@ -1,7 +1,7 @@
 use crate::api::PowerInfo;
 use crate::config::{NotifyConfig, NotifyType};
 use crate::time;
-use crate::utils::retry;
+use crate::utils::retry_with_backoff;
 use chrono::Timelike;
 use chrono_tz::Tz;
 use lettre::transport::smtp::client::{Tls, TlsParameters};
@@ -14,9 +14,11 @@ use serde_json;
 use std::collections::HashMap;
 use std::error::Error;
 use std::future::Future;
+use std::io;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::time::Duration;
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,6 +39,23 @@ pub struct NotificationManager {
     consecutive_fetch_failures: u32,
     last_fetch_failure_notify_time: Option<chrono::DateTime<Tz>>,
     startup_notified: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DeliveryReport {
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+}
+
+impl DeliveryReport {
+    fn has_success(self) -> bool {
+        self.succeeded > 0
+    }
+
+    fn all_failed(self) -> bool {
+        self.total > 0 && self.failed == self.total
+    }
 }
 
 impl NotificationManager {
@@ -72,28 +91,129 @@ impl NotificationManager {
         })
     }
 
-    async fn notify_all(&self, data: &PowerInfo, event: NotificationEvent) {
-        for (idx, notifier) in self.notifiers.iter().enumerate() {
-            if retry(|| notifier.notify(data, event), 3, Duration::from_secs(2))
-                .await
-                .is_err()
-            {
-                error!("Notifier {} failed: request error (details redacted)", idx);
-            }
-        }
+    fn retry_attempts(&self) -> usize {
+        usize::try_from(self.config.retry_attempts)
+            .unwrap_or(usize::MAX)
+            .max(1)
     }
 
-    async fn notify_error_all(&self, error_msg: &str, event: NotificationEvent) {
+    fn retry_initial_delay(&self) -> Duration {
+        Duration::from_secs(self.config.retry_initial_delay_seconds.max(1))
+    }
+
+    fn retry_max_delay(&self) -> Duration {
+        Duration::from_secs(self.config.retry_max_delay_seconds.max(1))
+    }
+
+    fn request_timeout(&self) -> Duration {
+        Duration::from_secs(self.config.request_timeout_seconds.max(1))
+    }
+
+    async fn notify_all(&self, data: &PowerInfo, event: NotificationEvent) -> DeliveryReport {
+        let mut report = DeliveryReport {
+            total: self.notifiers.len(),
+            ..Default::default()
+        };
+
         for (idx, notifier) in self.notifiers.iter().enumerate() {
-            if retry(
-                || notifier.notify_error(error_msg, event),
-                3,
-                Duration::from_secs(2),
-            )
-            .await
-            .is_err()
+            if self
+                .send_with_retry(idx, notifier.as_ref(), || notifier.notify(data, event))
+                .await
             {
-                error!("Notifier {} failed: request error (details redacted)", idx);
+                report.succeeded += 1;
+            } else {
+                report.failed += 1;
+            }
+        }
+
+        if report.all_failed() {
+            error!(
+                "All {} notifier(s) failed for {:?}; notification state will not be marked as sent",
+                report.total, event
+            );
+        }
+
+        report
+    }
+
+    async fn notify_error_all(&self, error_msg: &str, event: NotificationEvent) -> DeliveryReport {
+        let mut report = DeliveryReport {
+            total: self.notifiers.len(),
+            ..Default::default()
+        };
+
+        for (idx, notifier) in self.notifiers.iter().enumerate() {
+            if self
+                .send_with_retry(idx, notifier.as_ref(), || {
+                    notifier.notify_error(error_msg, event)
+                })
+                .await
+            {
+                report.succeeded += 1;
+            } else {
+                report.failed += 1;
+            }
+        }
+
+        if report.all_failed() {
+            error!(
+                "All {} notifier(s) failed for {:?}; notification state will not be marked as sent",
+                report.total, event
+            );
+        }
+
+        report
+    }
+
+    async fn send_with_retry<'a, F, Fut>(
+        &'a self,
+        idx: usize,
+        notifier: &'a dyn Notifier,
+        mut operation: F,
+    ) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<(), Box<dyn Error>>> + Send + 'a,
+    {
+        let attempts = self.retry_attempts();
+        let request_timeout = self.request_timeout();
+        let result = retry_with_backoff(
+            || {
+                let fut = operation();
+                async move {
+                    match timeout(request_timeout, fut).await {
+                        Ok(result) => result,
+                        Err(_) => Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("notification timed out after {:?}", request_timeout),
+                        )
+                        .into()),
+                    }
+                }
+            },
+            attempts,
+            self.retry_initial_delay(),
+            self.retry_max_delay(),
+        )
+        .await;
+
+        match result {
+            Ok(()) => {
+                debug!(
+                    "Notifier {} ({}) delivered notification",
+                    idx,
+                    notifier.name()
+                );
+                true
+            }
+            Err(_) => {
+                error!(
+                    "Notifier {} ({}) failed after {} attempt(s): request error (details redacted)",
+                    idx,
+                    notifier.name(),
+                    attempts
+                );
+                false
             }
         }
     }
@@ -104,9 +224,15 @@ impl NotificationManager {
 
         if self.config.enabled && self.config.startup_enabled && !self.startup_notified {
             info!("Sending startup notification...");
-            self.notify_all(data, NotificationEvent::Startup).await;
-            self.startup_notified = true;
-            debug!("Startup notification sent successfully");
+            let report = self.notify_all(data, NotificationEvent::Startup).await;
+            if report.has_success() {
+                self.startup_notified = true;
+                debug!("Startup notification sent successfully");
+            } else {
+                warn!(
+                    "Startup notification failed; it will be retried on the next successful poll"
+                );
+            }
         }
 
         // Heartbeat Check
@@ -123,9 +249,16 @@ impl NotificationManager {
                 let slot = (now.date_naive(), target_hour);
                 if self.last_heartbeat_slot != Some(slot) {
                     info!("Sending daily heartbeat...");
-                    self.notify_all(data, NotificationEvent::Heartbeat).await;
-                    self.last_heartbeat_slot = Some(slot);
-                    debug!("Heartbeat sent successfully");
+                    let report = self.notify_all(data, NotificationEvent::Heartbeat).await;
+                    if report.has_success() {
+                        self.last_heartbeat_slot = Some(slot);
+                        debug!("Heartbeat sent successfully");
+                    } else {
+                        warn!(
+                            "Heartbeat notification failed for today's {}:00 slot; it will be retried while this hour is active",
+                            target_hour
+                        );
+                    }
                 } else {
                     debug!("Heartbeat already sent for today's {}:00 slot", target_hour);
                 }
@@ -185,9 +318,15 @@ impl NotificationManager {
 
             if should_notify {
                 debug!("Sending low balance notification...");
-                self.notify_all(data, NotificationEvent::LowBalance).await;
-                self.last_low_balance_notify_time = Some(now);
-                debug!("Low balance notification sent successfully");
+                let report = self.notify_all(data, NotificationEvent::LowBalance).await;
+                if report.has_success() {
+                    self.last_low_balance_notify_time = Some(now);
+                    debug!("Low balance notification sent successfully");
+                } else {
+                    warn!(
+                        "Low balance notification failed; cooldown will not be consumed and it will be retried"
+                    );
+                }
             }
 
             self.last_balance = Some(current_balance);
@@ -200,9 +339,14 @@ impl NotificationManager {
         }
 
         info!("Sending login failure notification...");
-        self.notify_error_all(error_msg, NotificationEvent::LoginFailure)
+        let report = self
+            .notify_error_all(error_msg, NotificationEvent::LoginFailure)
             .await;
-        debug!("Login failure notification sent successfully");
+        if report.has_success() {
+            debug!("Login failure notification sent successfully");
+        } else {
+            warn!("Login failure notification failed");
+        }
     }
 
     pub async fn record_fetch_failure(&mut self) {
@@ -234,10 +378,17 @@ impl NotificationManager {
                     "Failed to fetch data {} times consecutively",
                     self.consecutive_fetch_failures
                 );
-                self.notify_error_all(&error_msg, NotificationEvent::ConsecutiveFetchFailures)
+                let report = self
+                    .notify_error_all(&error_msg, NotificationEvent::ConsecutiveFetchFailures)
                     .await;
-                self.last_fetch_failure_notify_time = Some(now);
-                debug!("Consecutive fetch failures notification sent successfully");
+                if report.has_success() {
+                    self.last_fetch_failure_notify_time = Some(now);
+                    debug!("Consecutive fetch failures notification sent successfully");
+                } else {
+                    warn!(
+                        "Consecutive fetch failures notification failed; cooldown will not be consumed"
+                    );
+                }
             }
         }
     }
@@ -254,6 +405,10 @@ impl NotificationManager {
 }
 
 pub trait Notifier: Send + Sync {
+    fn name(&self) -> &'static str {
+        "unknown"
+    }
+
     fn notify<'a>(
         &'a self,
         info: &'a PowerInfo,
@@ -291,6 +446,7 @@ pub fn create_single_notifier(
             let client = create_untrusted_http_client_with_pinned_dns(
                 pinned_target.host.as_str(),
                 &pinned_target.resolved_addrs,
+                config.request_timeout_seconds,
             );
 
             Some(Box::new(WebhookNotifier::new(webhook_url, client)))
@@ -305,6 +461,7 @@ pub fn create_single_notifier(
             Some(Box::new(TelegramNotifier::new(
                 config.telegram_bot_token.clone(),
                 config.telegram_chat_id.clone(),
+                config.request_timeout_seconds,
             )))
         }
         NotifyType::Pushover => {
@@ -321,6 +478,7 @@ pub fn create_single_notifier(
                 config.pushover_retry,
                 config.pushover_expire,
                 optional_string(&config.pushover_url),
+                config.request_timeout_seconds,
             )))
         }
         NotifyType::Ntfy => {
@@ -340,6 +498,7 @@ pub fn create_single_notifier(
             let client = create_untrusted_http_client_with_pinned_dns(
                 pinned_target.host.as_str(),
                 &pinned_target.resolved_addrs,
+                config.request_timeout_seconds,
             );
 
             Some(Box::new(NtfyNotifier::new(
@@ -510,9 +669,9 @@ fn resolve_public_socket_addrs(host: &str, port: Option<u16>) -> Option<Vec<Sock
     Some(resolved_addrs)
 }
 
-fn create_http_client() -> reqwest::Client {
+fn create_http_client(timeout_seconds: u64) -> reqwest::Client {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(timeout_seconds.max(1)))
         .build()
         .expect("failed to build reqwest client with timeout")
 }
@@ -520,9 +679,10 @@ fn create_http_client() -> reqwest::Client {
 fn create_untrusted_http_client_with_pinned_dns(
     host: &str,
     resolved_addrs: &[SocketAddr],
+    timeout_seconds: u64,
 ) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(timeout_seconds.max(1)))
         .redirect(reqwest::redirect::Policy::none());
     if !resolved_addrs.is_empty() {
         builder = builder.resolve_to_addrs(host, resolved_addrs);
@@ -535,6 +695,10 @@ fn create_untrusted_http_client_with_pinned_dns(
 pub struct ConsoleNotifier;
 
 impl Notifier for ConsoleNotifier {
+    fn name(&self) -> &'static str {
+        "console"
+    }
+
     fn notify<'a>(
         &'a self,
         info: &'a PowerInfo,
@@ -604,6 +768,10 @@ impl WebhookNotifier {
 }
 
 impl Notifier for WebhookNotifier {
+    fn name(&self) -> &'static str {
+        "webhook"
+    }
+
     fn notify<'a>(
         &'a self,
         info: &'a PowerInfo,
@@ -675,9 +843,9 @@ pub struct TelegramNotifier {
 }
 
 impl TelegramNotifier {
-    pub fn new(bot_token: String, chat_id: String) -> Self {
+    pub fn new(bot_token: String, chat_id: String, timeout_seconds: u64) -> Self {
         Self {
-            client: create_http_client(),
+            client: create_http_client(timeout_seconds),
             bot_token,
             chat_id,
         }
@@ -685,6 +853,10 @@ impl TelegramNotifier {
 }
 
 impl Notifier for TelegramNotifier {
+    fn name(&self) -> &'static str {
+        "telegram"
+    }
+
     fn notify<'a>(
         &'a self,
         info: &'a PowerInfo,
@@ -827,9 +999,10 @@ impl PushoverNotifier {
         default_retry: u32,
         default_expire: u32,
         default_url: Option<String>,
+        timeout_seconds: u64,
     ) -> Self {
         Self {
-            client: create_http_client(),
+            client: create_http_client(timeout_seconds),
             api_token,
             user_key,
             default_priority,
@@ -895,6 +1068,10 @@ impl PushoverNotifier {
 }
 
 impl Notifier for PushoverNotifier {
+    fn name(&self) -> &'static str {
+        "pushover"
+    }
+
     fn notify<'a>(
         &'a self,
         info: &'a PowerInfo,
@@ -1066,6 +1243,10 @@ impl NtfyNotifier {
 }
 
 impl Notifier for NtfyNotifier {
+    fn name(&self) -> &'static str {
+        "ntfy"
+    }
+
     fn notify<'a>(
         &'a self,
         info: &'a PowerInfo,
@@ -1195,6 +1376,10 @@ impl EmailNotifier {
 }
 
 impl Notifier for EmailNotifier {
+    fn name(&self) -> &'static str {
+        "email"
+    }
+
     fn notify<'a>(
         &'a self,
         info: &'a PowerInfo,
@@ -1331,12 +1516,128 @@ impl Notifier for EmailNotifier {
 mod tests {
     use super::*;
     use crate::config::{NotifyConfig, SmtpEncryption};
+    use std::io;
 
     fn base_notify_config() -> NotifyConfig {
         NotifyConfig {
             enabled: true,
+            retry_attempts: 1,
+            retry_initial_delay_seconds: 1,
+            retry_max_delay_seconds: 1,
+            request_timeout_seconds: 1,
             ..Default::default()
         }
+    }
+
+    fn sample_power_info(remaining_money: f64) -> PowerInfo {
+        PowerInfo {
+            code: 0,
+            message: "ok".to_string(),
+            remaining_energy: 12.3,
+            remaining_money,
+            meter_room_id: "meter-room".to_string(),
+            room_display_name: "room".to_string(),
+            room_id: "room-id".to_string(),
+            building_id: "building-id".to_string(),
+            campus_id: "campus-id".to_string(),
+            room_number: "101".to_string(),
+        }
+    }
+
+    struct StaticNotifier {
+        succeeds: bool,
+    }
+
+    impl Notifier for StaticNotifier {
+        fn name(&self) -> &'static str {
+            "test"
+        }
+
+        fn notify<'a>(
+            &'a self,
+            _info: &'a PowerInfo,
+            _event: NotificationEvent,
+        ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+            Box::pin(async move {
+                if self.succeeds {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("simulated notifier failure").into())
+                }
+            })
+        }
+
+        fn notify_error<'a>(
+            &'a self,
+            _error_msg: &'a str,
+            _event: NotificationEvent,
+        ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+            Box::pin(async move {
+                if self.succeeds {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("simulated notifier failure").into())
+                }
+            })
+        }
+    }
+
+    fn manager_with_notifier(config: NotifyConfig, succeeds: bool) -> NotificationManager {
+        NotificationManager {
+            config,
+            notifiers: vec![Box::new(StaticNotifier { succeeds })],
+            last_low_balance_notify_time: None,
+            last_heartbeat_slot: None,
+            last_balance: None,
+            consecutive_fetch_failures: 0,
+            last_fetch_failure_notify_time: None,
+            startup_notified: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_notification_failure_is_not_marked_sent() {
+        let mut config = base_notify_config();
+        config.startup_enabled = true;
+        let mut manager = manager_with_notifier(config, false);
+
+        manager.check_and_notify(&sample_power_info(10.0)).await;
+
+        assert!(!manager.startup_notified);
+    }
+
+    #[tokio::test]
+    async fn startup_notification_success_is_marked_sent() {
+        let mut config = base_notify_config();
+        config.startup_enabled = true;
+        let mut manager = manager_with_notifier(config, true);
+
+        manager.check_and_notify(&sample_power_info(10.0)).await;
+
+        assert!(manager.startup_notified);
+    }
+
+    #[tokio::test]
+    async fn low_balance_failure_does_not_consume_cooldown() {
+        let mut config = base_notify_config();
+        config.threshold = 5.0;
+        let mut manager = manager_with_notifier(config, false);
+
+        manager.check_and_notify(&sample_power_info(4.0)).await;
+
+        assert!(manager.last_low_balance_notify_time.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_failure_notification_failure_does_not_consume_cooldown() {
+        let mut config = base_notify_config();
+        config.fetch_failure_enabled = true;
+        config.fetch_failure_threshold = 1;
+        let mut manager = manager_with_notifier(config, false);
+
+        manager.record_fetch_failure().await;
+
+        assert!(manager.last_fetch_failure_notify_time.is_none());
     }
 
     #[test]
