@@ -23,6 +23,8 @@ services:
       # 如果你不想把账号密码写进 config.toml，也可以取消下面两行注释：
       # UPM_USERNAME: "2023xxxxxxx"
       # UPM_PASSWORD: "your_password"
+      # 如使用 wechat 登录，或希望 Cookie 加密密钥独立于账号密码，请配置：
+      # UPM_COOKIE_ENCRYPTION_KEY: "change-me-to-a-long-random-secret"
 
       # 如需代理可取消注释：
       # HTTPS_PROXY: http://proxy.example.com:8080

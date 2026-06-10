@@ -129,7 +129,8 @@ docker compose up -d --build
 | `interval_seconds` | 轮询间隔（秒） | `600` |
 | `timezone` | 应用时区 | `Asia/Shanghai` |
 | `login_type` | 登录方式：`password` / `wechat` | `password` |
-| `cookie_file` | Cookie 持久化文件 | `uestc_cookies.json` |
+| `cookie_file` | 加密 Cookie 持久化文件 | `uestc_cookies.json` |
+| `cookie_encryption_key` | Cookie 落盘加密密钥；`password` 登录可默认由账号密码派生，`wechat` 登录必须显式配置 | 无 |
 | `notify.enabled` | 是否启用通知 | `false` |
 | `notify.threshold` | 低余额阈值（元） | `5.0` |
 | `notify.cooldown_minutes` | 低余额重复提醒冷却（分钟） | `520` |
@@ -150,6 +151,8 @@ UPM_USERNAME=2023xxxxxxx
 UPM_PASSWORD=your_password
 UPM_DATABASE_URL=sqlite://data/power_monitor.db
 UPM_TIMEZONE=Asia/Shanghai
+# 可选：使用独立 Cookie 加密密钥；wechat 登录时必填
+UPM_COOKIE_ENCRYPTION_KEY=change-me-to-a-long-random-secret
 UPM_NOTIFY__ENABLED=true
 UPM_NOTIFY__STARTUP_ENABLED=true
 UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
@@ -163,8 +166,16 @@ UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 
 - `/run/secrets/username`
 - `/run/secrets/password`
+- `/run/secrets/cookie_encryption_key`
 - `/run/secrets/service_url`（当前代码中预留）
 - `/run/secrets/database_url`
+
+### Cookie 持久化安全
+
+- Cookie 文件现在使用 AES-256-GCM 加密后保存，文件权限在 Unix 平台上会设置为 `0600`。
+- 不兼容旧的明文 Cookie 文件：已有明文文件会被忽略，并在下次成功登录后写成新的加密格式。
+- `password` 登录如果没有显式配置 `cookie_encryption_key`，会使用账号和密码作为密钥材料派生加密密钥。
+- `wechat` 登录无法从密码派生密钥，必须配置 `cookie_encryption_key`（推荐使用环境变量或 Docker Secret）。
 
 ---
 
@@ -270,16 +281,9 @@ cargo test
 - 需使用公网 `https` 地址
 - 不可指向 localhost/内网地址或解析到内网 IP
 
-### 4）本地构建提示 `../uestc-client` 路径问题
+### 4）更换登录方式后无法读取 Cookie
 
-`Cargo.toml` 中包含开发期本地补丁：
-
-```toml
-[patch.crates-io]
-uestc-client = { path = "../uestc-client" }
-```
-
-若你没有该同级目录，请移除此段，改用 crates.io 版本。
+旧明文 Cookie 不再兼容，会被忽略并在下次成功登录后重写为加密格式。若更换了 `cookie_encryption_key`，也需要删除旧 Cookie 文件后重新登录。
 
 ---
 

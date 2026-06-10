@@ -29,6 +29,7 @@ pub struct AppConfig {
     pub login_type: LoginType,
     #[serde(default = "default_cookie_file")]
     pub cookie_file: String,
+    pub cookie_encryption_key: Option<String>,
     #[serde(default = "default_interval")]
     pub interval_seconds: u64,
     #[serde(default)]
@@ -480,16 +481,20 @@ impl AppConfig {
         let secrets = [
             ("username", "/run/secrets/username"),
             ("password", "/run/secrets/password"),
+            (
+                "cookie_encryption_key",
+                "/run/secrets/cookie_encryption_key",
+            ),
             ("service_url", "/run/secrets/service_url"),
             ("database_url", "/run/secrets/database_url"),
         ];
 
         let mut secrets_map = std::collections::HashMap::new();
         for (key, path) in secrets {
-            if Path::new(path).exists() {
-                if let Ok(content) = fs::read_to_string(path) {
-                    secrets_map.insert(key, content.trim().to_string());
-                }
+            if Path::new(path).exists()
+                && let Ok(content) = fs::read_to_string(path)
+            {
+                secrets_map.insert(key, content.trim().to_string());
             }
         }
 
@@ -544,6 +549,14 @@ impl AppConfig {
             errors.push("cookie_file cannot be empty".to_string());
         }
 
+        if self
+            .cookie_encryption_key
+            .as_deref()
+            .is_some_and(|key| key.trim().is_empty())
+        {
+            errors.push("cookie_encryption_key cannot be empty when set".to_string());
+        }
+
         // Static validation only: avoid runtime/business dependency checks.
         if self
             .notify
@@ -588,6 +601,40 @@ impl AppConfig {
             Ok(())
         } else {
             Err(ConfigValidationError::new(errors))
+        }
+    }
+
+    pub fn cookie_encryption_secret(&self) -> Result<String, String> {
+        if let Some(key) = self.cookie_encryption_key.as_deref()
+            && !key.trim().is_empty()
+        {
+            return Ok(key.to_string());
+        }
+
+        match self.login_type {
+            LoginType::Password => {
+                let username = self
+                    .username
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty());
+                let password = self
+                    .password
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty());
+
+                match (username, password) {
+                    (Some(username), Some(password)) => {
+                        Ok(format!("uestc-power-monitor:{username}:{password}"))
+                    }
+                    _ => Err(
+                        "cookie_encryption_key is required when username/password are unavailable"
+                            .to_string(),
+                    ),
+                }
+            }
+            LoginType::Wechat => Err(
+                "cookie_encryption_key is required for wechat login cookie encryption".to_string(),
+            ),
         }
     }
 }
@@ -776,6 +823,7 @@ heartbeat_hours = 8
             timezone: "Asia/Shanghai".to_string(),
             login_type: LoginType::Password,
             cookie_file: "cookies.json".to_string(),
+            cookie_encryption_key: None,
             interval_seconds: 600,
             notify,
         }
@@ -835,6 +883,40 @@ heartbeat_hours = 8
 
         let err = cfg.validate().expect_err("validation should fail");
         assert!(err.to_string().contains("notify.smtp_encryption=none"));
+    }
+
+    #[test]
+    fn cookie_encryption_secret_uses_explicit_key_first() {
+        let mut cfg = valid_app_config();
+        cfg.cookie_encryption_key = Some("explicit-secret".to_string());
+
+        assert_eq!(
+            cfg.cookie_encryption_secret()
+                .expect("secret should resolve"),
+            "explicit-secret"
+        );
+    }
+
+    #[test]
+    fn cookie_encryption_secret_falls_back_to_password_credentials() {
+        let cfg = valid_app_config();
+
+        assert_eq!(
+            cfg.cookie_encryption_secret()
+                .expect("secret should resolve"),
+            "uestc-power-monitor:alice:secret"
+        );
+    }
+
+    #[test]
+    fn cookie_encryption_secret_requires_explicit_key_for_wechat() {
+        let mut cfg = valid_app_config();
+        cfg.login_type = LoginType::Wechat;
+
+        let err = cfg
+            .cookie_encryption_secret()
+            .expect_err("wechat login should require a key");
+        assert!(err.contains("cookie_encryption_key is required for wechat"));
     }
 
     #[test]

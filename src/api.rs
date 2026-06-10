@@ -14,7 +14,13 @@ impl ApiService {
     pub async fn new(config: &AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let user_display = config.username.as_deref().unwrap_or("unknown");
         debug!("Creating new API service for user: {}", user_display);
-        let client = UestcClient::with_cookie_file(&config.cookie_file);
+        let cookie_encryption_secret = config
+            .cookie_encryption_secret()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let client = UestcClient::with_encrypted_cookie_file(
+            &config.cookie_file,
+            cookie_encryption_secret.as_bytes(),
+        );
 
         let service = Self {
             client,

@@ -7,6 +7,10 @@ password = "your_password"
 
 # Cookie 保存路径 (默认为 "uestc_cookies.json")
 # cookie_file = "uestc_cookies.json"
+# Cookie 落盘加密密钥。
+# password 登录默认使用账号密码派生；wechat 登录或希望密钥独立于密码时请显式设置。
+# 也可使用环境变量 UPM_COOKIE_ENCRYPTION_KEY 或 Docker secret /run/secrets/cookie_encryption_key。
+# cookie_encryption_key = "change-me-to-a-long-random-secret"
 
 # 监控轮询间隔（秒）
 interval_seconds = 600
