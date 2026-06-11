@@ -12,6 +12,10 @@ FROM rust:1-bookworm AS cacher
 WORKDIR /usr/src/app
 RUN cargo install cargo-chef
 COPY --from=planner /usr/src/app/recipe.json recipe.json
+# cargo-chef's recipe references local path dependencies, but it does not
+# embed their source trees. Copy vendored path dependencies before `cook` so
+# Cargo can resolve `uestc-client = { path = "vendor/uestc-client" }`.
+COPY --from=planner /usr/src/app/vendor vendor
 # This step compiles dependencies. As long as Cargo.toml doesn't change, this layer is cached
 RUN cargo chef cook --release --recipe-path recipe.json
 
