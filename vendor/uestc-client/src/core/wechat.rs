@@ -2,10 +2,27 @@ use crate::{Result, UestcClientError};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use regex::Regex;
+use std::time::{Duration, Instant};
 use url::Url;
 
 pub const WECHAT_OPEN_URL: &str = "https://open.weixin.qq.com";
 pub const WECHAT_LP_URL: &str = "https://lp.open.weixin.qq.com";
+
+/// 等待扫码的总时长上限。微信通常会先返回 402（过期），但接口异常时
+/// 这是唯一能让轮询循环退出的兜底。
+pub const QR_SCAN_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// 单次轮询请求的超时。微信长轮询正常在 ~25s 内返回。
+pub const POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 两次轮询之间的间隔。
+pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// 连续轮询失败的容忍次数。一次网络抖动不应作废用户正在扫的二维码。
+pub const MAX_CONSECUTIVE_POLL_FAILURES: u32 = 5;
+
+/// 连续未知状态码的容忍次数。防止接口变更或风控导致无限轮询。
+pub const MAX_CONSECUTIVE_UNKNOWN_STATUS: u32 = 10;
 
 #[derive(Debug)]
 pub struct WechatAuthParams {
@@ -262,4 +279,213 @@ pub fn parse_scan_status(text: &str) -> Result<ScanResult> {
     };
 
     Ok(ScanResult { status, wx_code })
+}
+
+/// 扫码轮询的健壮性守卫：总时长上限 + 连续失败计数。
+///
+/// 轮询循环本身没有出口条件（只靠微信返回 402 过期），网络抖动又会让单次
+/// 请求直接冒泡失败而作废二维码。这个守卫把两类问题都收敛成"连续超过阈值
+/// 才放弃"，偶发失败只是重试。
+pub struct ScanPollGuard {
+    deadline: Instant,
+    consecutive_failures: u32,
+    consecutive_unknown: u32,
+}
+
+impl ScanPollGuard {
+    pub fn new() -> Self {
+        Self::with_timeout(QR_SCAN_TIMEOUT)
+    }
+
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            deadline: Instant::now() + timeout,
+            consecutive_failures: 0,
+            consecutive_unknown: 0,
+        }
+    }
+
+    /// 每轮轮询前调用。超过总时长上限时返回错误，让调用方退出循环。
+    pub fn check_deadline(&self) -> Result<()> {
+        if Instant::now() >= self.deadline {
+            log::warn!("等待扫码超时，放弃当前二维码");
+            return Err(UestcClientError::WeChatError {
+                message: "Timed out waiting for WeChat QR code scan".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// 轮询请求或响应解析失败时调用。连续失败未达上限时返回 `Ok`，调用方
+    /// 应当继续下一轮；达到上限则把原始错误交还给调用方。
+    pub fn record_failure(&mut self, error: UestcClientError) -> Result<()> {
+        self.consecutive_failures += 1;
+        if self.consecutive_failures >= MAX_CONSECUTIVE_POLL_FAILURES {
+            log::error!(
+                "轮询连续失败 {} 次，放弃当前二维码",
+                self.consecutive_failures
+            );
+            return Err(error);
+        }
+
+        log::warn!(
+            "轮询失败（{}/{}），将继续重试: {}",
+            self.consecutive_failures,
+            MAX_CONSECUTIVE_POLL_FAILURES,
+            error
+        );
+        Ok(())
+    }
+
+    /// 成功拿到一个状态后调用，负责重置/累加计数。
+    /// 连续收到未知状态码超过上限时返回错误。
+    pub fn record_status(&mut self, status: &ScanStatus) -> Result<()> {
+        self.consecutive_failures = 0;
+
+        match status {
+            ScanStatus::Unknown(code) => {
+                self.consecutive_unknown += 1;
+                if self.consecutive_unknown >= MAX_CONSECUTIVE_UNKNOWN_STATUS {
+                    log::error!(
+                        "连续 {} 次收到未知状态码 {}，放弃当前二维码",
+                        self.consecutive_unknown,
+                        code
+                    );
+                    return Err(UestcClientError::WeChatError {
+                        message: format!(
+                            "Received unknown WeChat status code {} {} times in a row",
+                            code, self.consecutive_unknown
+                        ),
+                    });
+                }
+                log::warn!(
+                    "未知状态码: {}（{}/{}）",
+                    code,
+                    self.consecutive_unknown,
+                    MAX_CONSECUTIVE_UNKNOWN_STATUS
+                );
+            }
+            _ => self.consecutive_unknown = 0,
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for ScanPollGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn network_error() -> UestcClientError {
+        UestcClientError::WeChatError {
+            message: "boom".to_string(),
+        }
+    }
+
+    #[test]
+    fn deadline_passes_before_timeout_and_fails_after() {
+        let guard = ScanPollGuard::with_timeout(Duration::from_secs(60));
+        guard.check_deadline().expect("should not be expired yet");
+
+        let expired = ScanPollGuard::with_timeout(Duration::ZERO);
+        let err = expired
+            .check_deadline()
+            .expect_err("zero timeout should expire immediately");
+        assert!(err.to_string().contains("Timed out waiting"));
+    }
+
+    #[test]
+    fn transient_failures_are_tolerated_until_the_limit() {
+        let mut guard = ScanPollGuard::new();
+        for _ in 0..MAX_CONSECUTIVE_POLL_FAILURES - 1 {
+            guard
+                .record_failure(network_error())
+                .expect("below the limit should keep polling");
+        }
+
+        guard
+            .record_failure(network_error())
+            .expect_err("hitting the limit should surface the error");
+    }
+
+    #[test]
+    fn a_successful_poll_resets_the_failure_counter() {
+        let mut guard = ScanPollGuard::new();
+        for _ in 0..MAX_CONSECUTIVE_POLL_FAILURES - 1 {
+            guard.record_failure(network_error()).expect("below limit");
+        }
+
+        guard
+            .record_status(&ScanStatus::Waiting)
+            .expect("known status is fine");
+
+        // Counter was reset, so we can absorb a full batch of failures again.
+        for _ in 0..MAX_CONSECUTIVE_POLL_FAILURES - 1 {
+            guard
+                .record_failure(network_error())
+                .expect("counter should have been reset");
+        }
+    }
+
+    #[test]
+    fn consecutive_unknown_status_codes_abort_the_loop() {
+        let mut guard = ScanPollGuard::new();
+        for _ in 0..MAX_CONSECUTIVE_UNKNOWN_STATUS - 1 {
+            guard
+                .record_status(&ScanStatus::Unknown(999))
+                .expect("below the limit should keep polling");
+        }
+
+        let err = guard
+            .record_status(&ScanStatus::Unknown(999))
+            .expect_err("hitting the limit should abort");
+        assert!(err.to_string().contains("unknown WeChat status code 999"));
+    }
+
+    #[test]
+    fn a_known_status_resets_the_unknown_counter() {
+        let mut guard = ScanPollGuard::new();
+        for _ in 0..MAX_CONSECUTIVE_UNKNOWN_STATUS - 1 {
+            guard.record_status(&ScanStatus::Unknown(999)).expect("below limit");
+        }
+
+        guard
+            .record_status(&ScanStatus::Scanned)
+            .expect("known status is fine");
+
+        for _ in 0..MAX_CONSECUTIVE_UNKNOWN_STATUS - 1 {
+            guard
+                .record_status(&ScanStatus::Unknown(999))
+                .expect("counter should have been reset");
+        }
+    }
+
+    #[test]
+    fn scan_status_parsing_covers_documented_codes() {
+        let cases = [
+            ("window.wx_errcode=408;", ScanStatus::Waiting),
+            ("window.wx_errcode=404;", ScanStatus::Scanned),
+            ("window.wx_errcode=402;", ScanStatus::Expired),
+            ("window.wx_errcode=500;", ScanStatus::Unknown(500)),
+        ];
+
+        for (body, expected) in cases {
+            let result = parse_scan_status(body).expect("parse should succeed");
+            assert_eq!(result.status, expected, "body: {}", body);
+        }
+    }
+
+    #[test]
+    fn confirmed_status_extracts_wx_code() {
+        let body = r#"window.wx_errcode=405;window.wx_code='abc123';"#;
+        let result = parse_scan_status(body).expect("parse should succeed");
+        assert_eq!(result.status, ScanStatus::Confirmed);
+        assert_eq!(result.wx_code.as_deref(), Some("abc123"));
+    }
 }

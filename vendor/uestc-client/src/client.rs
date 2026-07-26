@@ -1,4 +1,5 @@
 use reqwest::header;
+use std::time::Duration;
 
 mod cookie_persistence;
 
@@ -15,6 +16,13 @@ pub use async_impl::UestcClient;
 pub use blocking_impl::UestcBlockingClient;
 
 pub(crate) const AUTH_SERVER_URL: &str = "https://idas.uestc.edu.cn/authserver";
+
+/// 建连超时，避免 DNS 解析或 TCP 握手挂死。
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 单次请求的总超时（含读取响应体）。没有它，半开连接会让调用方永久阻塞；
+/// 扫码长轮询会用 `core::wechat::POLL_REQUEST_TIMEOUT` 单独覆盖。
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) fn default_headers() -> header::HeaderMap {
     let mut headers = header::HeaderMap::new();

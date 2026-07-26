@@ -78,6 +78,8 @@ impl UestcBlockingClient {
         let client = Client::builder()
             .default_headers(super::default_headers())
             .cookie_provider(cookie_store.clone())
+            .connect_timeout(super::CONNECT_TIMEOUT)
+            .timeout(super::REQUEST_TIMEOUT)
             .build()
             .expect("Failed to build client");
 
@@ -259,15 +261,32 @@ impl UestcBlockingClient {
         // Step 4: Poll for scan status
         log::debug!("等待扫码");
         let mut last_code: Option<String> = None;
+        let mut guard = wechat::ScanPollGuard::new();
         let wx_code = loop {
+            guard.check_deadline()?;
+
             let poll_url = wechat::build_poll_url(&uuid, last_code.as_deref());
-            let resp = self
-                .client
-                .get(&poll_url)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()?;
-            let text = resp.text()?;
-            let result = wechat::parse_scan_status(&text)?;
+            let polled = (|| {
+                let resp = self
+                    .client
+                    .get(&poll_url)
+                    .timeout(wechat::POLL_REQUEST_TIMEOUT)
+                    .send()?;
+                let text = resp.text()?;
+                wechat::parse_scan_status(&text)
+            })();
+
+            // A single blip must not invalidate a QR code the user is mid-scan on.
+            let result = match polled {
+                Ok(result) => result,
+                Err(e) => {
+                    guard.record_failure(e)?;
+                    std::thread::sleep(wechat::POLL_INTERVAL);
+                    continue;
+                }
+            };
+
+            guard.record_status(&result.status)?;
 
             match result.status {
                 wechat::ScanStatus::Confirmed => {
@@ -293,12 +312,12 @@ impl UestcBlockingClient {
                 wechat::ScanStatus::Waiting => {
                     // Keep waiting silently
                 }
-                wechat::ScanStatus::Unknown(code) => {
-                    log::warn!("未知状态码: {}", code);
+                wechat::ScanStatus::Unknown(_) => {
+                    // Counted and logged by the guard above.
                 }
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(wechat::POLL_INTERVAL);
         };
 
         // Step 5: Complete login
