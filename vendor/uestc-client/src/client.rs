@@ -24,6 +24,18 @@ pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 扫码长轮询会用 `core::wechat::POLL_REQUEST_TIMEOUT` 单独覆盖。
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 空闲连接的存活时间，需要短于服务端的 keep-alive 超时。
+///
+/// reqwest 默认保留 90s，而轮询型调用方（例如每分钟取一次数据的监控进程）
+/// 每次都会复用一条已空闲约 60s 的连接。若服务端先关掉它，请求就会在写入后
+/// 撞上 FIN，表现为随机的 "connection closed before message completed"。
+/// 25s 让连接在服务端回收之前先由客户端丢弃，代价只是偶尔多一次 TLS 握手。
+pub(crate) const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// TCP keepalive。必须短于 `POOL_IDLE_TIMEOUT`，否则空闲连接总是先被回收、
+/// 探测包永远发不出去；取 15s 也能让扫码长轮询（30s 级）中途探到对端消失。
+pub(crate) const TCP_KEEPALIVE: Duration = Duration::from_secs(15);
+
 pub(crate) fn default_headers() -> header::HeaderMap {
     let mut headers = header::HeaderMap::new();
     // common headers

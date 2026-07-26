@@ -132,7 +132,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 match retry(|| api_service.fetch_data(), 3, Duration::from_secs(2)).await {
                     Ok(Some(data)) => {
                         debug!("Data fetched successfully: room={}, money={:.2}, energy={:.2}",
-                            data.room_display_name, data.remaining_money, data.remaining_energy);
+                            crate::api::truncate_for_log(&data.room_display_name, crate::api::MAX_LOGGED_FIELD),
+                            data.remaining_money, data.remaining_energy);
 
                         // Reset consecutive failure counter on success
                         if let Some(manager) = &mut notification_manager {

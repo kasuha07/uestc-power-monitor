@@ -80,6 +80,8 @@ impl UestcBlockingClient {
             .cookie_provider(cookie_store.clone())
             .connect_timeout(super::CONNECT_TIMEOUT)
             .timeout(super::REQUEST_TIMEOUT)
+            .pool_idle_timeout(super::POOL_IDLE_TIMEOUT)
+            .tcp_keepalive(super::TCP_KEEPALIVE)
             .build()
             .expect("Failed to build client");
 
