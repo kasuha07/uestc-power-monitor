@@ -1,4 +1,8 @@
 /target
+# Produced by testing vendored path dependencies standalone
+# (cargo test --manifest-path vendor/uestc-client/Cargo.toml)
+vendor/*/target/
+vendor/*/Cargo.lock
 config.toml
 uestc_cookies.json
 *.db
