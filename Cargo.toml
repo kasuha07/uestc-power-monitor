@@ -3,6 +3,9 @@ name = "uestc-power-monitor"
 version = "0.5.4"
 edition = "2024"
 
+[workspace]
+members = ["vendor/uestc-client"]
+
 [dependencies]
 uestc-client = { path = "vendor/uestc-client" }
 tokio = { version = "1", features = ["full"] }

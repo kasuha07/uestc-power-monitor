@@ -58,7 +58,7 @@ pub fn load_encrypted_cookie_store(
         ));
     }
 
-    let encrypted_json = fs::read_to_string(path).map_err(|e| {
+    let content = fs::read_to_string(path).map_err(|e| {
         cookie_error(
             "read",
             path,
@@ -67,7 +67,37 @@ pub fn load_encrypted_cookie_store(
         )
     })?;
 
-    let encrypted: EncryptedCookieFile = serde_json::from_str(&encrypted_json).map_err(|e| {
+    match load_encrypted_envelope(&content, path, encryption_secret) {
+        Ok(store) => Ok(Arc::new(CookieStoreMutex::new(store))),
+        Err(encrypted_err) => match parse_plaintext_cookies(&content, path) {
+            Some(cookies) => {
+                // 旧版（未加密）cookie 文件：解析成功后立即迁移为加密格式。
+                let store = Arc::new(CookieStoreMutex::new(store_from_cookies(cookies)));
+                log::info!(
+                    "检测到旧版明文 cookie 文件，自动迁移为加密存储: {:?}",
+                    path
+                );
+                if let Err(e) = save_encrypted_cookie_store(path, &store, encryption_secret) {
+                    // 写回失败时保留原明文文件，待下次启动重试；内存中的 cookie 仍可使用。
+                    log::warn!(
+                        "迁移 cookie 文件为加密格式失败，保留原文件待下次启动重试: {}",
+                        e
+                    );
+                }
+                Ok(store)
+            }
+            None => Err(encrypted_err),
+        },
+    }
+}
+
+/// 按加密信封格式解析并解密 cookie。失败返回 Err（由调用方决定是否回退明文）。
+fn load_encrypted_envelope(
+    content: &str,
+    path: &Path,
+    encryption_secret: &[u8],
+) -> Result<CookieStore> {
+    let encrypted: EncryptedCookieFile = serde_json::from_str(content).map_err(|e| {
         cookie_error(
             "deserialize_envelope",
             path,
@@ -134,7 +164,22 @@ pub fn load_encrypted_cookie_store(
         )
     })?;
 
-    Ok(Arc::new(CookieStoreMutex::new(store_from_cookies(cookies))))
+    Ok(store_from_cookies(cookies))
+}
+
+/// 尝试按旧版明文格式（加密前的 cookie 文件）解析。失败返回 None。
+fn parse_plaintext_cookies(content: &str, path: &Path) -> Option<Vec<SerializableCookie>> {
+    match serde_json::from_str::<Vec<SerializableCookie>>(content) {
+        Ok(cookies) => Some(cookies),
+        Err(e) => {
+            log::debug!(
+                "cookie 文件既非加密信封也非旧版明文格式: {:?} ({})",
+                path,
+                e
+            );
+            None
+        }
+    }
 }
 
 pub fn save_encrypted_cookie_store(
@@ -348,18 +393,21 @@ fn store_from_cookies(cookies: Vec<SerializableCookie>) -> CookieStore {
 fn write_secure_cookie_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
+        // 先写临时文件再原子重命名，避免写入中途失败留下截断的 cookie 文件。
+        let tmp_path = path.with_extension("tmp");
         let mut file = fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .mode(0o600)
-            .open(path)?;
+            .open(&tmp_path)?;
         file.write_all(contents)?;
 
         let mut permissions = file.metadata()?.permissions();
         permissions.set_mode(0o600);
         file.set_permissions(permissions)?;
         file.flush()?;
+        fs::rename(&tmp_path, path)?;
         Ok(())
     }
 
@@ -449,6 +497,96 @@ mod tests {
         let err = load_encrypted_cookie_store(&path, b"wrong-secret")
             .expect_err("wrong secret must not decrypt");
         assert!(err.to_string().contains("Failed to decrypt cookies"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn plaintext_cookie_file_is_migrated_to_encrypted_on_load() {
+        let path = unique_cookie_path();
+        // 模拟旧版明文格式（uestc-client 0.3.0 加密前的 cookie 文件）。
+        let plaintext_json = r#"[
+            {
+                "name": "SESSION",
+                "value": "plaintext-secret-value",
+                "domain": "idas.uestc.edu.cn",
+                "path": "/",
+                "expires": null,
+                "secure": true,
+                "http_only": true
+            }
+        ]"#;
+        fs::write(&path, plaintext_json).expect("write plaintext cookie file");
+
+        let loaded = load_encrypted_cookie_store(&path, b"test-secret")
+            .expect("migrate and load plaintext cookies");
+        assert!(
+            loaded
+                .lock()
+                .expect("lock migrated cookies")
+                .iter_any()
+                .any(|cookie| cookie.name() == "SESSION"
+                    && cookie.value() == "plaintext-secret-value")
+        );
+
+        // 文件应立即变为加密信封格式，且不含任何明文内容。
+        let contents = fs::read_to_string(&path).expect("read migrated file");
+        assert!(contents.contains("\"cipher\": \"AES-256-GCM\""));
+        assert!(!contents.contains("SESSION"));
+        assert!(!contents.contains("plaintext-secret-value"));
+
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        // 迁移后的加密文件可再次正常加载（round-trip）。
+        let reloaded = load_encrypted_cookie_store(&path, b"test-secret")
+            .expect("reload migrated file");
+        assert!(
+            reloaded
+                .lock()
+                .expect("lock reloaded cookies")
+                .iter_any()
+                .any(|cookie| cookie.name() == "SESSION")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_plaintext_file_migrates_to_empty_encrypted_file() {
+        let path = unique_cookie_path();
+        fs::write(&path, "[]").expect("write empty plaintext cookie file");
+
+        let loaded = load_encrypted_cookie_store(&path, b"test-secret")
+            .expect("migrate empty plaintext file");
+        assert_eq!(cookie_count(&loaded), 0);
+
+        let contents = fs::read_to_string(&path).expect("read migrated file");
+        assert!(contents.contains("\"cipher\": \"AES-256-GCM\""));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn garbage_cookie_file_still_fails_to_load() {
+        let path = unique_cookie_path();
+        fs::write(
+            &path,
+            r#"{"this": "is", "neither": "encrypted", "nor": "plaintext"}"#,
+        )
+        .expect("write garbage cookie file");
+
+        let err = load_encrypted_cookie_store(&path, b"test-secret")
+            .expect_err("garbage file must fail to load");
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize encrypted cookie envelope"),
+            "unexpected error: {}",
+            err
+        );
 
         let _ = fs::remove_file(path);
     }

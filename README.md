@@ -175,8 +175,9 @@ UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 
 ### Cookie 持久化安全
 
-- Cookie 文件现在使用 AES-256-GCM 加密后保存，文件权限在 Unix 平台上会设置为 `0600`。
-- 不兼容旧的明文 Cookie 文件：已有明文文件会被忽略，并在下次成功登录后写成新的加密格式。
+- Cookie 文件使用 AES-256-GCM 加密后保存，文件权限在 Unix 平台上会设置为 `0600`。
+- 兼容旧版明文 Cookie 文件：启动时若检测到旧格式（未加密的 JSON 数组），会自动迁移为加密格式并继续使用，无需重新登录。
+- 损坏的 Cookie 文件会被忽略，并在下次成功登录后写成新的加密格式。
 - `password` 登录如果没有显式配置 `cookie_encryption_key`，会使用账号和密码作为密钥材料派生加密密钥。
 - `wechat` 登录无法从密码派生密钥，必须配置 `cookie_encryption_key`（推荐使用环境变量或 Docker Secret）。
 

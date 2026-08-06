@@ -122,3 +122,9 @@ version = "2.1"
 
 [dev-dependencies.env_logger]
 version = "0.11"
+
+# 仅测试用：本机无系统 OpenSSL 时，让 openssl-sys 以 vendored 方式编译。
+# dev-dependencies 不参与发布，不影响生产构建。
+[dev-dependencies.openssl]
+version = "0.10"
+features = ["vendored"]
