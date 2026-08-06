@@ -17,13 +17,19 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config = match AppConfig::new() {
+    let mut config = match AppConfig::new() {
         Ok(cfg) => cfg,
         Err(e) => {
             error!("Failed to load configuration: {}", e);
             return Err(e.into());
         }
     };
+
+    // 凭据缺失时交互式输入（仅当 stdin 为终端时生效，否则报错提示改用环境变量等）
+    if let Err(e) = config.prompt_for_credentials() {
+        error!("{}", e);
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e).into());
+    }
 
     if let Err(e) = config.validate() {
         error!("{}", e);

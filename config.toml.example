@@ -1,4 +1,5 @@
 # UESTC 统一身份认证账号 (使用 password 登录时必须)
+# 也可不配置，启动时交互式提示输入（密码隐藏回显，不落盘；仅限终端环境）
 username = "your_student_id"
 password = "your_password"
 

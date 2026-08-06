@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde::de::{self, SeqAccess, Unexpected, Visitor};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::io::{self, IsTerminal, Write};
 use std::{fs, path::Path};
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Default)]
@@ -487,6 +488,19 @@ impl Display for ConfigValidationError {
 
 impl Error for ConfigValidationError {}
 
+/// 读取一行普通输入（不回显隐藏），返回去除首尾空白后的内容。
+fn prompt_line(prompt: &str) -> Result<String, String> {
+    print!("{prompt}");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("刷新终端输出失败: {e}"))?;
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("读取输入失败: {e}"))?;
+    Ok(line.trim().to_string())
+}
+
 impl AppConfig {
     pub fn new() -> Result<Self, ConfigError> {
         let mut builder = Config::builder();
@@ -552,6 +566,76 @@ impl AppConfig {
         }
 
         Ok(cfg)
+    }
+
+    /// 交互式补全缺失的登录凭据（仅在凭据缺失且 stdin 为终端时提示输入）。
+    ///
+    /// - `password` 登录：`username` / `password` 缺失（或为空）时依次提示输入；
+    /// - `wechat` 登录：`cookie_encryption_key` 缺失时提示输入（密码方式隐藏回显）。
+    ///
+    /// 标准输入不是终端（如 systemd、CI、Docker 无 TTY 环境）时直接报错，避免进程
+    /// 挂起等待输入；此时请改用环境变量（`UPM_USERNAME` / `UPM_PASSWORD`）、
+    /// Docker Secrets 或配置文件提供凭据。
+    pub fn prompt_for_credentials(&mut self) -> Result<(), String> {
+        let missing: Vec<&'static str> = match self.login_type {
+            LoginType::Password => {
+                let mut missing = Vec::new();
+                if self.username.as_deref().map_or(true, |v| v.trim().is_empty()) {
+                    missing.push("username");
+                }
+                if self.password.as_deref().map_or(true, |v| v.trim().is_empty()) {
+                    missing.push("password");
+                }
+                missing
+            }
+            LoginType::Wechat => {
+                if self
+                    .cookie_encryption_key
+                    .as_deref()
+                    .map_or(true, |v| v.trim().is_empty())
+                {
+                    vec!["cookie_encryption_key"]
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        if !io::stdin().is_terminal() {
+            return Err(format!(
+                "{} 未配置，且标准输入不是终端，无法交互式输入。\n\
+                 请改用环境变量（如 UPM_USERNAME / UPM_PASSWORD）、\n\
+                 Docker Secrets（/run/secrets/username、/run/secrets/password）\n\
+                 或配置文件提供凭据。",
+                missing.join("、")
+            ));
+        }
+
+        for field in missing {
+            match field {
+                "username" => {
+                    self.username = Some(prompt_line("请输入用户名（学号）: ")?);
+                }
+                "password" => {
+                    self.password =
+                        Some(rpassword::prompt_password("请输入密码: ").map_err(|e| {
+                            format!("读取密码输入失败: {e}")
+                        })?);
+                }
+                "cookie_encryption_key" => {
+                    self.cookie_encryption_key = Some(
+                        rpassword::prompt_password("请输入 Cookie 加密密钥: ")
+                            .map_err(|e| format!("读取密钥输入失败: {e}"))?,
+                    );
+                }
+                _ => unreachable!("unexpected missing field: {field}"),
+            }
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<(), ConfigValidationError> {

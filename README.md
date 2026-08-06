@@ -72,6 +72,11 @@ cp config.toml.example config.toml
 - `database_url`（如 `sqlite://power_monitor.db`）
 - `notify` 下的通知配置
 
+> **不想把账号密码写进配置文件？** 可以不配置 `username`/`password`，
+> 启动时程序会交互式提示输入（密码隐藏回显，不落盘）。
+> 注意：交互输入要求标准输入为终端（直接 `cargo run` 即可）；
+> 在 systemd、CI 或 Docker 等非终端环境请改用环境变量或 Docker Secrets。
+
 ### 3）运行
 
 ```bash
@@ -113,6 +118,7 @@ docker compose up -d --build
 1. 环境变量（`UPM_` 前缀）
 2. Docker Secrets（`/run/secrets/*`）
 3. 配置文件（`config.toml`）
+4. 交互式输入（启动时凭据缺失且 stdin 为终端时提示）
 
 > `UPM_TIMEZONE` 会在反序列化后再次覆盖，保证时区优先级生效。
 
