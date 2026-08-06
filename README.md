@@ -135,6 +135,9 @@ docker compose up -d --build
 | `notify.threshold` | 低余额阈值（元） | `5.0` |
 | `notify.cooldown_minutes` | 低余额重复提醒冷却（分钟） | `520` |
 | `notify.startup_enabled` | 启动通知开关 | `false` |
+| `notify.login_retry_failure_enabled` | 登录重试失败通知开关（会话失效后重登连续失败时提醒） | `false` |
+| `notify.login_retry_failure_threshold` | 登录重试失败连续轮次阈值 | `3` |
+| `notify.login_retry_failure_cooldown_minutes` | 登录重试失败通知滚动冷却（分钟） | `1440` |
 | `notify.heartbeat_enabled` | 每日心跳开关 | `false` |
 | `notify.heartbeat_hours` | 每日心跳小时（0-23，支持单值或数组，兼容 `heartbeat_hour`） | `[9]` |
 | `notify.retry_attempts` | 每个通知通道最大尝试次数 | `3` |
@@ -212,6 +215,7 @@ UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 - **Startup**：服务启动后首次成功拉取时触发
 - **Heartbeat**：每天在一个或多个指定小时发送状态心跳
 - **LoginFailure**：启动登录失败时发送
+- **LoginRetryFailure**：运行期会话失效后重登连续失败达到阈值时发送（滚动冷却，默认一天最多一次）
 - **ConsecutiveFetchFailures**：连续抓取失败达到阈值后发送
 
 ### 通知通道
@@ -232,7 +236,7 @@ UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 
 - 每个通道独立重试，使用指数退避并限制最大退避时间
 - 单次通知发送有超时保护，避免某个通道长期阻塞
-- 仅当至少一个通道发送成功时才会消耗启动/心跳/低余额/连续失败通知状态；全部失败时会在后续轮询继续尝试
+- 仅当至少一个通道发送成功时才会消耗启动/心跳/低余额/连续失败/登录重试失败通知状态；全部失败时会在后续轮询继续尝试
 
 ### 安全限制（Webhook / ntfy）
 

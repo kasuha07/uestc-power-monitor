@@ -135,9 +135,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             crate::api::truncate_for_log(&data.room_display_name, crate::api::MAX_LOGGED_FIELD),
                             data.remaining_money, data.remaining_energy);
 
-                        // Reset consecutive failure counter on success
+                        // Reset consecutive failure counters on success
                         if let Some(manager) = &mut notification_manager {
                             manager.reset_fetch_failures();
+                            manager.reset_login_retry_failures();
                         }
 
                         // save data to database
@@ -160,9 +161,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err(e) => {
                         error!("Failed to fetch data: {}", e);
-                        // Record consecutive fetch failure
+                        // 区分失败原因：会话失效后重登失败走登录重试通知
+                        // （一天一次），其余网络/上游失败仍计入连续拉取失败。
                         if let Some(manager) = &mut notification_manager {
-                            manager.record_fetch_failure().await;
+                            if api_service.take_login_retry_failure() {
+                                manager.record_login_retry_failure(&e.to_string()).await;
+                            } else {
+                                manager.record_fetch_failure().await;
+                            }
                         }
                     }
                 }

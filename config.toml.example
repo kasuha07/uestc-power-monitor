@@ -31,7 +31,12 @@ heartbeat_hours = [9]     # 每日心跳通知时间（0-23，支持单值或数
 startup_enabled = true    # 是否启用启动通知（首次成功拉取后发送一次）
 
 # 登录失败通知
-login_failure_enabled = true  # 是否启用登录失败通知
+login_failure_enabled = true  # 是否启用登录失败通知（启动时登录失败，重试后仍失败时发送并退出）
+
+# 登录重试失败通知（会话失效后自动重登连续失败达到阈值时发送，默认一天最多一次）
+login_retry_failure_enabled = true  # 是否启用登录重试失败通知（默认 false）
+login_retry_failure_threshold = 3   # 连续失败轮次阈值（默认3轮）
+login_retry_failure_cooldown_minutes = 1440  # 滚动冷却时间（分钟，默认1440 = 一天最多一次）
 
 # 连续获取数据失败通知
 fetch_failure_enabled = true  # 是否启用连续获取数据失败通知

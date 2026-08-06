@@ -30,6 +30,11 @@ pub struct ApiService {
     client: UestcClient,
     config: AppConfig,
     login_throttle: LoginThrottle,
+    /// 本轮取数周期内是否发生过重新登录失败（含被节流拒绝）。
+    /// 由 `lib.rs` 在取数失败后读取并清除，用于区分"登录重试失败"
+    /// 与"普通网络失败"——前者走 `LoginRetryFailure` 通知（一天一次），
+    /// 后者仍计入 `ConsecutiveFetchFailures`。
+    login_retry_failure: Mutex<bool>,
 }
 
 impl ApiService {
@@ -48,6 +53,7 @@ impl ApiService {
             client,
             config: config.clone(),
             login_throttle: LoginThrottle::new(),
+            login_retry_failure: Mutex::new(false),
         };
 
         // 首次登录不受冷却限制，但要记进节流器，免得刚启动就立刻重登一次。
@@ -77,6 +83,7 @@ impl ApiService {
             }
         }
         debug!("Login successful");
+        self.clear_login_retry_failure();
 
         // Initialize session with forced CAS authentication
         let init_url = "https://online.uestc.edu.cn/common/actionCasLogin?redirect_url=https://online.uestc.edu.cn/page/";
@@ -91,13 +98,49 @@ impl ApiService {
     /// 而不是继续往统一身份认证上撞。
     async fn relogin(&self) -> Result<(), Box<dyn std::error::Error>> {
         if !self.login_throttle.claim(Instant::now(), LOGIN_COOLDOWN) {
+            self.note_login_retry_failure();
             return Err(format!(
                 "skipping re-login: another login attempt happened less than {:?} ago",
                 LOGIN_COOLDOWN
             )
             .into());
         }
-        self.login().await
+        match self.login().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // 登录成功会由 `login()` 清除标志；失败则在此置位，
+                // 供 `lib.rs` 区分本轮失败是否由登录引起。
+                self.note_login_retry_failure();
+                Err(e)
+            }
+        }
+    }
+
+    fn note_login_retry_failure(&self) {
+        *self
+            .login_retry_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    }
+
+    fn clear_login_retry_failure(&self) {
+        *self
+            .login_retry_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+    }
+
+    /// 读取并清除"本轮发生过重新登录失败"标志。
+    ///
+    /// `lib.rs` 在取数失败（`retry` 耗尽）后调用：返回 `true` 说明这轮失败
+    /// 由会话失效后的重登失败引起，应计入 `LoginRetryFailure` 通知；
+    /// 返回 `false` 则是普通网络/上游失败，仍计入 `ConsecutiveFetchFailures`。
+    pub fn take_login_retry_failure(&self) -> bool {
+        let mut flag = self
+            .login_retry_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *flag)
     }
 
     async fn check_session(&self) -> bool {

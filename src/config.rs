@@ -219,6 +219,14 @@ fn default_fetch_failure_cooldown_minutes() -> u64 {
     60 // 1 hour
 }
 
+fn default_login_retry_failure_threshold() -> u32 {
+    3 // 3 consecutive failed re-login cycles
+}
+
+fn default_login_retry_failure_cooldown_minutes() -> u64 {
+    1440 // 24 hours: at most one notification per day
+}
+
 fn default_notify_retry_attempts() -> u32 {
     3
 }
@@ -288,6 +296,15 @@ pub struct NotifyConfig {
     pub startup_enabled: bool,
     #[serde(default)]
     pub login_failure_enabled: bool,
+    /// 运行期会话失效后重登连续失败达到阈值时，发送提醒通知。
+    /// 与 `login_failure_enabled`（启动失败即退出）语义独立。
+    #[serde(default)]
+    pub login_retry_failure_enabled: bool,
+    #[serde(default = "default_login_retry_failure_threshold")]
+    pub login_retry_failure_threshold: u32,
+    /// 滚动冷却：距上次成功发送至少这么久才允许再发。默认 1440 分钟（一天一次）。
+    #[serde(default = "default_login_retry_failure_cooldown_minutes")]
+    pub login_retry_failure_cooldown_minutes: u64,
     #[serde(default)]
     pub fetch_failure_enabled: bool,
     #[serde(default = "default_fetch_failure_threshold")]
@@ -369,6 +386,9 @@ impl Default for NotifyConfig {
             heartbeat_hours: HeartbeatHours::default(),
             startup_enabled: false,
             login_failure_enabled: false,
+            login_retry_failure_enabled: false,
+            login_retry_failure_threshold: default_login_retry_failure_threshold(),
+            login_retry_failure_cooldown_minutes: default_login_retry_failure_cooldown_minutes(),
             fetch_failure_enabled: false,
             fetch_failure_threshold: default_fetch_failure_threshold(),
             fetch_failure_cooldown_minutes: default_fetch_failure_cooldown_minutes(),
@@ -573,6 +593,10 @@ impl AppConfig {
 
         if self.notify.fetch_failure_threshold == 0 {
             errors.push("notify.fetch_failure_threshold must be greater than 0".to_string());
+        }
+
+        if self.notify.login_retry_failure_threshold == 0 {
+            errors.push("notify.login_retry_failure_threshold must be greater than 0".to_string());
         }
 
         if self.notify.retry_attempts == 0 {
@@ -874,6 +898,26 @@ heartbeat_hours = 8
 
         let err = cfg.validate().expect_err("validation should fail");
         assert!(err.to_string().contains("notify.fetch_failure_threshold"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_login_retry_failure_threshold() {
+        let mut cfg = valid_app_config();
+        cfg.notify.login_retry_failure_threshold = 0;
+
+        let err = cfg.validate().expect_err("validation should fail");
+        assert!(
+            err.to_string()
+                .contains("notify.login_retry_failure_threshold")
+        );
+    }
+
+    #[test]
+    fn login_retry_failure_config_defaults() {
+        let notify = NotifyConfig::default();
+        assert!(!notify.login_retry_failure_enabled);
+        assert_eq!(notify.login_retry_failure_threshold, 3);
+        assert_eq!(notify.login_retry_failure_cooldown_minutes, 1440);
     }
 
     #[test]

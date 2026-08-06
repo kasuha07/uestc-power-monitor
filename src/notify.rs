@@ -27,6 +27,9 @@ pub enum NotificationEvent {
     Heartbeat,
     Startup,
     LoginFailure,
+    /// 运行期会话失效后重登连续失败达到阈值时触发（区别于启动时
+    /// 登录失败的 `LoginFailure`：后者进程即将退出，前者服务仍在静默重试）。
+    LoginRetryFailure,
     ConsecutiveFetchFailures,
 }
 
@@ -38,6 +41,11 @@ pub struct NotificationManager {
     last_balance: Option<f64>,
     consecutive_fetch_failures: u32,
     last_fetch_failure_notify_time: Option<chrono::DateTime<Tz>>,
+    /// 会话失效后重登失败的连续轮次数。成功登录（即成功取到数据）后清零。
+    consecutive_login_retry_failures: u32,
+    /// 滚动冷却：距上次成功发送至少 `login_retry_failure_cooldown_minutes`
+    /// 分钟才允许再发（默认 1440，即一天最多一次）。
+    last_login_retry_failure_notify_time: Option<chrono::DateTime<Tz>>,
     startup_notified: bool,
 }
 
@@ -87,6 +95,8 @@ impl NotificationManager {
             last_balance: None,
             consecutive_fetch_failures: 0,
             last_fetch_failure_notify_time: None,
+            consecutive_login_retry_failures: 0,
+            last_login_retry_failure_notify_time: None,
             startup_notified: false,
         })
     }
@@ -390,6 +400,64 @@ impl NotificationManager {
                     );
                 }
             }
+        }
+    }
+
+    /// 记录一次"会话失效后重登失败"的轮次。计数跨轮次连续累计，
+    /// 达到阈值且冷却到期时发送 `LoginRetryFailure` 通知；通知后计数
+    /// 不清零（失败状态持续存在），直到成功登录由 `reset_login_retry_failures` 清零。
+    pub async fn record_login_retry_failure(&mut self, error_msg: &str) {
+        self.consecutive_login_retry_failures += 1;
+        debug!(
+            "Consecutive login retry failures: {}",
+            self.consecutive_login_retry_failures
+        );
+
+        if !self.config.enabled || !self.config.login_retry_failure_enabled {
+            return;
+        }
+
+        if self.consecutive_login_retry_failures >= self.config.login_retry_failure_threshold {
+            let now = time::now();
+            let should_notify = if let Some(last_time) = self.last_login_retry_failure_notify_time {
+                let elapsed = now.signed_duration_since(last_time);
+                elapsed.num_minutes() >= self.config.login_retry_failure_cooldown_minutes as i64
+            } else {
+                true
+            };
+
+            if should_notify {
+                info!(
+                    "Sending login retry failure notification (count: {})...",
+                    self.consecutive_login_retry_failures
+                );
+                let error_msg = format!(
+                    "Login retry failed {} times consecutively. Last error: {}\n\
+                     Please check your credentials or network.",
+                    self.consecutive_login_retry_failures, error_msg
+                );
+                let report = self
+                    .notify_error_all(&error_msg, NotificationEvent::LoginRetryFailure)
+                    .await;
+                if report.has_success() {
+                    self.last_login_retry_failure_notify_time = Some(now);
+                    debug!("Login retry failure notification sent successfully");
+                } else {
+                    warn!(
+                        "Login retry failure notification failed; cooldown will not be consumed"
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn reset_login_retry_failures(&mut self) {
+        if self.consecutive_login_retry_failures > 0 {
+            debug!(
+                "Resetting consecutive login retry failures counter (was: {})",
+                self.consecutive_login_retry_failures
+            );
+            self.consecutive_login_retry_failures = 0;
         }
     }
 
@@ -724,7 +792,9 @@ impl Notifier for ConsoleNotifier {
                         info.room_display_name, info.remaining_money, info.remaining_energy
                     );
                 }
-                NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
+                NotificationEvent::LoginFailure
+                | NotificationEvent::LoginRetryFailure
+                | NotificationEvent::ConsecutiveFetchFailures => {
                     // These events use notify_error instead
                 }
             }
@@ -741,6 +811,12 @@ impl Notifier for ConsoleNotifier {
             match event {
                 NotificationEvent::LoginFailure => {
                     error!("UESTC Power Monitor 🔐 [Login Failure] {}", error_msg);
+                }
+                NotificationEvent::LoginRetryFailure => {
+                    error!(
+                        "UESTC Power Monitor 🔐 [Login Retry Failure] {}",
+                        error_msg
+                    );
                 }
                 NotificationEvent::ConsecutiveFetchFailures => {
                     error!("UESTC Power Monitor ❌ [Fetch Failures] {}", error_msg);
@@ -782,7 +858,9 @@ impl Notifier for WebhookNotifier {
                 NotificationEvent::LowBalance => "low_balance",
                 NotificationEvent::Heartbeat => "heartbeat",
                 NotificationEvent::Startup => "startup",
-                NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
+                NotificationEvent::LoginFailure
+                | NotificationEvent::LoginRetryFailure
+                | NotificationEvent::ConsecutiveFetchFailures => {
                     return Ok(()); // These events use notify_error instead
                 }
             };
@@ -807,6 +885,7 @@ impl Notifier for WebhookNotifier {
         Box::pin(async move {
             let event_str = match event {
                 NotificationEvent::LoginFailure => "login_failure",
+                NotificationEvent::LoginRetryFailure => "login_retry_failure",
                 NotificationEvent::ConsecutiveFetchFailures => "consecutive_fetch_failures",
                 NotificationEvent::LowBalance
                 | NotificationEvent::Heartbeat
@@ -867,7 +946,9 @@ impl Notifier for TelegramNotifier {
                 NotificationEvent::LowBalance => "⚠️ [Low Power Warning]",
                 NotificationEvent::Heartbeat => "ℹ️ [Daily Report]",
                 NotificationEvent::Startup => "🚀 [Startup]",
-                NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
+                NotificationEvent::LoginFailure
+                | NotificationEvent::LoginRetryFailure
+                | NotificationEvent::ConsecutiveFetchFailures => {
                     return Ok(()); // These events use notify_error instead
                 }
             };
@@ -900,6 +981,7 @@ impl Notifier for TelegramNotifier {
         Box::pin(async move {
             let title = match event {
                 NotificationEvent::LoginFailure => "🔐 [Login Failure]",
+                NotificationEvent::LoginRetryFailure => "🔐 [Login Retry Failure]",
                 NotificationEvent::ConsecutiveFetchFailures => "❌ [Fetch Failures]",
                 NotificationEvent::LowBalance
                 | NotificationEvent::Heartbeat
@@ -962,6 +1044,7 @@ fn build_power_notification(
             ),
         )),
         NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => None,
+        NotificationEvent::LoginRetryFailure => None,
     }
 }
 
@@ -969,6 +1052,10 @@ fn build_error_notification(error_msg: &str, event: NotificationEvent) -> Option
     match event {
         NotificationEvent::LoginFailure => Some((
             "🔐 UESTC Power Monitor - Login Failure".to_string(),
+            format!("{}\nTime: {}", error_msg, time::now_display()),
+        )),
+        NotificationEvent::LoginRetryFailure => Some((
+            "🔐 UESTC Power Monitor - Login Retry Failure".to_string(),
             format!("{}\nTime: {}", error_msg, time::now_display()),
         )),
         NotificationEvent::ConsecutiveFetchFailures => Some((
@@ -1443,7 +1530,9 @@ impl Notifier for EmailNotifier {
                     );
                     (subject, body)
                 }
-                NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => {
+                NotificationEvent::LoginFailure
+                | NotificationEvent::LoginRetryFailure
+                | NotificationEvent::ConsecutiveFetchFailures => {
                     return Ok(()); // These events use notify_error instead
                 }
             };
@@ -1472,6 +1561,24 @@ impl Notifier for EmailNotifier {
                         Error: {}\n\
                         \n\
                         Please check your credentials and try again.\n\
+                        \n\
+                        Time: {}",
+                        error_msg,
+                        time::now_display()
+                    );
+                    (subject, body)
+                }
+                NotificationEvent::LoginRetryFailure => {
+                    let subject = "🔐 UESTC Power Monitor - Login Retry Failure";
+                    let body = format!(
+                        "UESTC Power Monitor - Login Retry Failure\n\
+                        \n\
+                        {}\n\
+                        \n\
+                        The system is unable to restore the session after it expired. This may indicate:\n\
+                        - Incorrect credentials (password changed)\n\
+                        - Account locked or suspended\n\
+                        - Network connectivity issues\n\
                         \n\
                         Time: {}",
                         error_msg,
@@ -1591,6 +1698,8 @@ mod tests {
             last_balance: None,
             consecutive_fetch_failures: 0,
             last_fetch_failure_notify_time: None,
+            consecutive_login_retry_failures: 0,
+            last_login_retry_failure_notify_time: None,
             startup_notified: false,
         }
     }
@@ -1638,6 +1747,110 @@ mod tests {
         manager.record_fetch_failure().await;
 
         assert!(manager.last_fetch_failure_notify_time.is_none());
+    }
+
+    #[tokio::test]
+    async fn login_retry_failure_reaches_threshold_and_notifies() {
+        let mut config = base_notify_config();
+        config.login_retry_failure_enabled = true;
+        config.login_retry_failure_threshold = 2;
+        let mut manager = manager_with_notifier(config, true);
+
+        manager.record_login_retry_failure("first error").await;
+        assert!(manager.last_login_retry_failure_notify_time.is_none());
+
+        manager.record_login_retry_failure("second error").await;
+        assert!(
+            manager.last_login_retry_failure_notify_time.is_some(),
+            "threshold reached but no notification was sent"
+        );
+        // 通知后计数不清零，失败状态持续存在。
+        assert_eq!(manager.consecutive_login_retry_failures, 2);
+    }
+
+    #[tokio::test]
+    async fn login_retry_failure_below_threshold_does_not_notify() {
+        let mut config = base_notify_config();
+        config.login_retry_failure_enabled = true;
+        config.login_retry_failure_threshold = 3;
+        let mut manager = manager_with_notifier(config, true);
+
+        manager.record_login_retry_failure("error").await;
+        manager.record_login_retry_failure("error").await;
+
+        assert!(manager.last_login_retry_failure_notify_time.is_none());
+    }
+
+    #[tokio::test]
+    async fn login_retry_failure_cooldown_suppresses_repeat_within_a_day() {
+        let mut config = base_notify_config();
+        config.login_retry_failure_enabled = true;
+        config.login_retry_failure_threshold = 2;
+        config.login_retry_failure_cooldown_minutes = 1440;
+        let mut manager = manager_with_notifier(config, true);
+
+        manager.record_login_retry_failure("error").await;
+        manager.record_login_retry_failure("error").await;
+        let first = manager.last_login_retry_failure_notify_time;
+        assert!(first.is_some());
+
+        // 冷却期内计数继续累计，但不再发送。
+        manager.record_login_retry_failure("error").await;
+        manager.record_login_retry_failure("error").await;
+        assert_eq!(
+            manager.last_login_retry_failure_notify_time, first,
+            "cooldown must suppress repeat notifications within a day"
+        );
+        assert_eq!(manager.consecutive_login_retry_failures, 4);
+    }
+
+    #[tokio::test]
+    async fn login_retry_failure_disabled_keeps_counting_but_never_notifies() {
+        let mut config = base_notify_config();
+        config.login_retry_failure_enabled = false;
+        config.login_retry_failure_threshold = 2;
+        let mut manager = manager_with_notifier(config, true);
+
+        manager.record_login_retry_failure("error").await;
+        manager.record_login_retry_failure("error").await;
+
+        assert_eq!(manager.consecutive_login_retry_failures, 2);
+        assert!(manager.last_login_retry_failure_notify_time.is_none());
+    }
+
+    #[tokio::test]
+    async fn login_retry_failure_notification_failure_does_not_consume_cooldown() {
+        let mut config = base_notify_config();
+        config.login_retry_failure_enabled = true;
+        config.login_retry_failure_threshold = 1;
+        let mut manager = manager_with_notifier(config, false);
+
+        manager.record_login_retry_failure("error").await;
+
+        assert!(manager.last_login_retry_failure_notify_time.is_none());
+    }
+
+    #[tokio::test]
+    async fn login_retry_failure_reset_clears_the_counter() {
+        let mut config = base_notify_config();
+        config.login_retry_failure_enabled = true;
+        config.login_retry_failure_threshold = 2;
+        let mut manager = manager_with_notifier(config, true);
+
+        manager.record_login_retry_failure("error").await;
+        manager.record_login_retry_failure("error").await;
+        assert!(manager.last_login_retry_failure_notify_time.is_some());
+
+        // 成功登录后清零；之后重新累计到阈值才可能再次通知。
+        manager.reset_login_retry_failures();
+        assert_eq!(manager.consecutive_login_retry_failures, 0);
+
+        manager.record_login_retry_failure("error").await;
+        assert_eq!(manager.consecutive_login_retry_failures, 1);
+        assert!(
+            manager.last_login_retry_failure_notify_time.is_some(),
+            "counter reset must not clear the cooldown state"
+        );
     }
 
     #[test]
