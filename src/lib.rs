@@ -16,7 +16,7 @@ use tokio::time::sleep;
 
 use tracing::{debug, error, info, warn};
 
-pub async fn run(reauth_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(login_only: bool, force: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = match AppConfig::new() {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -26,7 +26,8 @@ pub async fn run(reauth_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 凭据缺失时交互式输入（仅当 stdin 为终端时生效，否则报错提示改用环境变量等）
-    if let Err(e) = config.prompt_for_credentials() {
+    // `force`（`login --force`）时忽略 cookie 捷径，强制要求凭据。
+    if let Err(e) = config.prompt_for_credentials(force) {
         error!("{}", e);
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e).into());
     }
@@ -58,7 +59,7 @@ pub async fn run(reauth_only: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     // initialize services
     debug!("Initializing API service...");
-    let api_service = match retry(|| ApiService::new(&config), 3, Duration::from_secs(5)).await {
+    let api_service = match retry(|| ApiService::new(&config, force), 3, Duration::from_secs(5)).await {
         Ok(service) => {
             debug!("API service initialized");
             service
@@ -87,10 +88,10 @@ pub async fn run(reauth_only: bool) -> Result<(), Box<dyn std::error::Error>> {
         notification_manager.is_some()
     );
 
-    // `--reauth`：只完成登录 + 交互式 reauth + 保存 cookie，然后退出。
+    // `login`：只完成登录 + 交互式 reauth + 保存 cookie，然后退出。
     // 供无人值守 daemon 会话失效后人工恢复使用（幂等：会话有效时直接通过）。
-    if reauth_only {
-        info!("reauth 模式：登录 + 完成二次认证后退出（cookie 已保存）");
+    if login_only {
+        info!("login 模式：登录 + 完成二次认证后退出（cookie 已保存）");
         return Ok(());
     }
 
@@ -115,7 +116,7 @@ pub async fn run(reauth_only: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     // main loop
     // `reauth_waiting`：运行期命中 reauth（无人值守无法交互）后进入等待模式——
-    // 不再取数，按轮询间隔重载 cookie 文件（人工跑 `--reauth` 写入的新会话）
+    // 不再取数，按轮询间隔重载 cookie 文件（人工跑 `login --force` 写入的新会话）
     // 并探测业务会话，恢复后继续监控并发送确认通知。
     let mut reauth_waiting = false;
     loop {
@@ -157,7 +158,7 @@ pub async fn run(reauth_only: bool) -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         if let Some(manager) = &mut notification_manager {
                             manager
-                                .record_reauth_pending("业务会话仍未恢复，请尽快运行 `uestc-power-monitor --reauth`")
+                                .record_reauth_pending("业务会话仍未恢复，请尽快运行 `uestc-power-monitor login --force`")
                                 .await;
                         }
                         debug!("Sleeping for {:?}...", interval);
@@ -204,7 +205,7 @@ pub async fn run(reauth_only: bool) -> Result<(), Box<dyn std::error::Error>> {
                         // 其余网络/上游失败仍计入连续拉取失败。
                         if let Some(manager) = &mut notification_manager {
                             if api_service.take_reauth_pending() {
-                                warn!("需要人工完成二次认证（reauth），进入等待模式（可在终端运行 `uestc-power-monitor --reauth` 完成）");
+                                warn!("需要人工完成二次认证（reauth），进入等待模式（可在终端运行 `uestc-power-monitor login --force` 完成）");
                                 manager
                                     .record_reauth_pending(&e.to_string())
                                     .await;
@@ -215,7 +216,7 @@ pub async fn run(reauth_only: bool) -> Result<(), Box<dyn std::error::Error>> {
                                 manager.record_fetch_failure().await;
                             }
                         } else if api_service.take_reauth_pending() {
-                            warn!("需要人工完成二次认证（reauth），进入等待模式（可在终端运行 `uestc-power-monitor --reauth` 完成）");
+                            warn!("需要人工完成二次认证（reauth），进入等待模式（可在终端运行 `uestc-power-monitor login --force` 完成）");
                             reauth_waiting = true;
                         }
                     }

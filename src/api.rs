@@ -38,7 +38,7 @@ impl fmt::Display for ReauthPendingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "需要人工完成二次认证（reauth），请在终端运行 `uestc-power-monitor --reauth`"
+            "需要人工完成二次认证（reauth），请在终端运行 `uestc-power-monitor login --force`"
         )
     }
 }
@@ -63,6 +63,8 @@ pub struct ApiService {
     client: UestcClient,
     config: AppConfig,
     login_throttle: LoginThrottle,
+    /// `login --force`：忽略现有 cookie 会话强制重新登录（不探测会话有效性）。
+    force_login: bool,
     /// 本轮取数周期内是否发生过重新登录失败（含被节流拒绝）。
     /// 由 `lib.rs` 在取数失败后读取并清除，用于区分"登录重试失败"
     /// 与"普通网络失败"——前者走 `LoginRetryFailure` 通知（一天一次），
@@ -75,7 +77,7 @@ pub struct ApiService {
 }
 
 impl ApiService {
-    pub async fn new(config: &AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(config: &AppConfig, force_login: bool) -> Result<Self, Box<dyn std::error::Error>> {
         let user_display = config.username.as_deref().unwrap_or("unknown");
         debug!("Creating new API service for user: {}", user_display);
         let cookie_encryption_secret = config
@@ -90,6 +92,7 @@ impl ApiService {
             client,
             config: config.clone(),
             login_throttle: LoginThrottle::new(),
+            force_login,
             login_retry_failure: Mutex::new(false),
             reauth_pending: Mutex::new(false),
         };
@@ -105,19 +108,20 @@ impl ApiService {
 
         // cookie 会话仍有效时直接跳过登录——此时账号密码根本用不到
         // （`client.login()` 内部才会探测会话，本层若先取凭据会白白拦截）。
-        if self.client.is_session_active().await {
+        // `--force` 时忽略该检查：`login --force` 的语义就是强制重登。
+        if !self.force_login && self.client.is_session_active().await {
             debug!("Cookie session is active, skipping login");
         } else {
             match self.config.login_type {
                 LoginType::Password => {
                     let username = self.config.username.as_ref().ok_or_else(|| {
                         "Username required for password login; cookie 会话已失效且未配置账号，\
-                         请设置 UPM_USERNAME / UPM_PASSWORD 或运行 `uestc-power-monitor --reauth` 恢复会话"
+                         请设置 UPM_USERNAME / UPM_PASSWORD 或运行 `uestc-power-monitor login --force` 恢复会话"
                             .to_string()
                     })?;
                     let password = self.config.password.as_ref().ok_or_else(|| {
                         "Password required for password login; cookie 会话已失效且未配置密码，\
-                         请设置 UPM_USERNAME / UPM_PASSWORD 或运行 `uestc-power-monitor --reauth` 恢复会话"
+                         请设置 UPM_USERNAME / UPM_PASSWORD 或运行 `uestc-power-monitor login --force` 恢复会话"
                             .to_string()
                     })?;
                     match self.client.login(username, password).await {
@@ -262,8 +266,8 @@ impl ApiService {
         }
     }
 
-    /// 等待人工 reauth 期间的探测：从磁盘重载 cookie 文件（`--reauth`
-    /// 子命令写入的新会话），再探测业务会话。恢复后调用方继续监控。
+    /// 等待人工 reauth 期间的探测：从磁盘重载 cookie 文件（`login`
+    /// 命令写入的新会话），再探测业务会话。恢复后调用方继续监控。
     pub(crate) async fn probe_recovered_session(&self) -> bool {
         if let Err(e) = self.client.reload_cookie_file() {
             warn!("重载 cookie 文件失败: {}", e);

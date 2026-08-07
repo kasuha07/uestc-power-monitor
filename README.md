@@ -11,7 +11,7 @@
 - **定时监控**：按固定间隔轮询电费数据（默认 600 秒）。
 - **自动重试与会话恢复**：请求失败自动重试；检测到会话失效会自动重新登录。
 - **reauth 二次认证支持**：账号触发多因子认证时，启动（终端）交互式完成；
-  无人值守时发送通知等待人工，人工跑 `--reauth` 后 daemon 自动恢复。
+  无人值守时发送通知等待人工，人工跑 `login --force` 后 daemon 自动恢复。
 - **SQLite 持久化**：每次采样写入 `power_records`，便于后续统计分析。
 - **多事件通知**：
   - 低余额告警
@@ -231,9 +231,12 @@ UESTC 统一认证启用了多因子策略：密码登录成功后会被 302 到
   `reauth_trust_device` 的默认值，输入 `y` 则信任此设备（下次同设备可能免二次认证）。
 - **无人值守运行期**：触发 reauth 时**不自动重试**（避免拿账号撞锁），发送
   `ReauthPending` 通知（首次立即、之后每 30 分钟重复提醒），进入等待模式。
-- **人工恢复**：在终端运行 `uestc-power-monitor --reauth`（登录 + 交互完成 reauth
-  + 保存 cookie 后退出，不进入监控循环；会话已有效时幂等通过），daemon 会在下个
-  轮询周期检测到会话恢复，自动继续监控并发送 `ReauthResolved` 确认通知。
+- **人工恢复**：在终端运行 `uestc-power-monitor login`（登录 + 交互完成 reauth
+  + 保存 cookie 后退出，不进入监控循环；会话已有效时幂等通过）。会话失效且未
+  配置账号密码时，普通 `login` 会因缺少凭据报错，请改用 `uestc-power-monitor
+  login --force`：忽略现有 cookie 强制重新登录，并交互提示输入账号密码。
+  daemon 会在下个轮询周期检测到会话恢复，自动继续监控并发送 `ReauthResolved`
+  确认通知。
 - 相关配置：`reauth_trust_device`（可信设备弹窗）、`notify.reauth_pending_*`、
   `notify.reauth_resolved_enabled`。
 
@@ -333,7 +336,7 @@ cargo test
 - 检查网络是否可访问 UESTC 服务
 - 若使用 `wechat` 登录，确认对应登录流程可用
 - 若报错为"需要人工完成二次认证（reauth）"：无人值守（非终端）环境无法交互完成
-  reauth，请在终端运行 `uestc-power-monitor --reauth` 完成认证后重启；
+  reauth，请在终端运行 `uestc-power-monitor login --force` 完成认证后重启；
   或配置通知渠道并在运行期等待 `ReauthPending` 通知后按上述流程恢复
 
 ### 2）收到 ReauthPending 通知（无人值守）
@@ -341,11 +344,12 @@ cargo test
 在终端（有 SSH/终端接入的机器）运行：
 
 ```bash
-uestc-power-monitor --reauth
+uestc-power-monitor login --force
 ```
 
-按提示选择 reauth 方式并完成认证（微信扫码 / 输入验证码；提交前可回答"是否记住
-该设备"），完成后 daemon 会在下个轮询周期自动恢复监控，无需重启 daemon。
+按提示完成认证：若未配置账号密码会先提示输入（用户名/密码），然后选择 reauth
+方式并完成认证（微信扫码 / 输入验证码；提交前可回答"是否记住该设备"），完成后
+daemon 会在下个轮询周期自动恢复监控，无需重启 daemon。
 
 ### 3）没有收到通知
 

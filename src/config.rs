@@ -597,16 +597,20 @@ impl AppConfig {
     ///   会话有效时根本用不到账号密码；
     /// - `wechat` 登录：`cookie_encryption_key` 缺失时提示输入（密码方式隐藏回显）。
     ///
+    /// `force`（`login --force`）：忽略"cookie 文件存在"捷径，总是要求凭据——
+    /// 强制重登必然需要账号密码，不能因 cookie 文件残留而跳过交互输入。
+    ///
     /// 标准输入不是终端（如 systemd、CI、Docker 无 TTY 环境）时直接报错，避免进程
     /// 挂起等待输入；此时请改用环境变量（`UPM_USERNAME` / `UPM_PASSWORD`）、
     /// Docker Secrets 或配置文件提供凭据。
-    pub fn prompt_for_credentials(&mut self) -> Result<(), String> {
+    pub fn prompt_for_credentials(&mut self, force: bool) -> Result<(), String> {
         let missing: Vec<&'static str> = match self.login_type {
             LoginType::Password => {
                 // cookie 文件已存在且非空、加密密钥可解析（显式 key 或账号密码派生）时，
                 // 跳过账号密码提示：会话有效则用不到账号密码；会话已失效时登录会明确报错
-                // （提示配置环境变量或运行 `--reauth`），而不是挂起等待交互输入。
-                if fs::metadata(&self.cookie_file).is_ok_and(|m| m.len() > 0)
+                // （提示配置环境变量或运行 `login --force`），而不是挂起等待交互输入。
+                if !force
+                    && fs::metadata(&self.cookie_file).is_ok_and(|m| m.len() > 0)
                     && self.cookie_encryption_secret().is_ok()
                 {
                     return Ok(());
@@ -1004,8 +1008,31 @@ heartbeat_hours = 8
             .to_string();
         std::fs::write(&cfg.cookie_file, b"{}").expect("write cookie file");
 
-        cfg.prompt_for_credentials()
+        cfg.prompt_for_credentials(false)
             .expect("cookie 文件存在且密钥可解析时应跳过凭据提示");
+    }
+
+    #[test]
+    fn prompt_for_credentials_force_overrides_cookie_shortcut() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock config test mutex");
+        let _guard = setup_test_config("database_url = \"sqlite://test.db\"\n", None);
+
+        // `login --force`：即使 cookie 文件存在且密钥可解析，也必须要求凭据
+        let mut cfg = valid_app_config();
+        cfg.username = None;
+        cfg.password = None;
+        cfg.cookie_encryption_key = Some("explicit-secret".to_string());
+        cfg.cookie_file = std::env::current_dir()
+            .expect("current dir")
+            .join("cookies.json")
+            .display()
+            .to_string();
+        std::fs::write(&cfg.cookie_file, b"{}").expect("write cookie file");
+
+        let err = cfg
+            .prompt_for_credentials(true)
+            .expect_err("force 时应忽略 cookie 捷径、要求凭据");
+        assert!(err.contains("标准输入不是终端"));
     }
 
     #[test]
@@ -1020,7 +1047,7 @@ heartbeat_hours = 8
         cfg.cookie_encryption_key = None;
 
         let err = cfg
-            .prompt_for_credentials()
+            .prompt_for_credentials(false)
             .expect_err("无 cookie 文件时应要求凭据");
         assert!(err.contains("标准输入不是终端"));
     }
@@ -1043,7 +1070,7 @@ heartbeat_hours = 8
         std::fs::write(&cfg.cookie_file, b"").expect("write empty cookie file");
 
         let err = cfg
-            .prompt_for_credentials()
+            .prompt_for_credentials(false)
             .expect_err("空 cookie 文件不应跳过凭据提示");
         assert!(err.contains("标准输入不是终端"));
     }

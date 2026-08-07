@@ -31,7 +31,7 @@ pub enum NotificationEvent {
     /// 登录失败的 `LoginFailure`：后者进程即将退出，前者服务仍在静默重试）。
     LoginRetryFailure,
     /// 运行期触发 reauth（多因子二次认证）且无人值守无法交互：需要人工
-    /// 完成第二因素（运行 `--reauth`），daemon 进入等待模式。
+    /// 完成第二因素（运行 `login`），daemon 进入等待模式。
     ReauthPending,
     /// 人工完成 reauth、daemon 会话恢复后触发（一次性确认）。
     ReauthResolved,
@@ -478,7 +478,7 @@ impl NotificationManager {
             info!("Sending reauth pending notification...");
             let msg = format!(
                 "需要人工完成二次认证（reauth）:\n{}\n\
-                 请在终端运行 `uestc-power-monitor --reauth` 完成认证，\n\
+                 请在终端运行 `uestc-power-monitor login --force` 完成认证，\n\
                  daemon 检测到会话恢复后会自动继续监控。",
                 error_msg
             );
@@ -1681,7 +1681,7 @@ impl Notifier for EmailNotifier {
                         \n\
                         {}\n\
                         \n\
-                        Please run `uestc-power-monitor --reauth` in a terminal\n\
+                        Please run `uestc-power-monitor login --force` in a terminal\n\
                         to complete the second-factor authentication.\n\
                         The daemon will resume monitoring automatically.\n\
                         \n\
