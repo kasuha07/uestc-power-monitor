@@ -13,8 +13,44 @@ use crate::time::DEFAULT_TIMEZONE;
 use crate::utils::retry;
 use std::time::Duration;
 use tokio::time::sleep;
+use uestc_client::UestcClient;
 
 use tracing::{debug, error, info, warn};
+
+/// `logout` 子命令：登出当前会话并清除本地 cookie 文件。
+///
+/// 无 cookie 文件时直接通过（无需登出）；cookie 加密密钥无法解析时
+/// 报错并提示手动删除 cookie 文件（此时无法解密 cookie、发不出登出请求）。
+pub async fn logout() -> Result<(), Box<dyn std::error::Error>> {
+    let config = match AppConfig::new() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            error!("Failed to load configuration: {}", e);
+            return Err(e.into());
+        }
+    };
+
+    if !std::path::Path::new(&config.cookie_file).exists() {
+        info!("未找到 cookie 文件（{}），无需登出", config.cookie_file);
+        return Ok(());
+    }
+
+    let cookie_encryption_secret = config
+        .cookie_encryption_secret()
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{e}（无法解密 cookie，可手动删除 cookie 文件）"),
+            )
+        })?;
+    let client = UestcClient::with_encrypted_cookie_file(
+        &config.cookie_file,
+        cookie_encryption_secret.as_bytes(),
+    );
+    client.logout().await?;
+    info!("已登出，本地 cookie 已清除");
+    Ok(())
+}
 
 pub async fn run(
     login_only: bool,

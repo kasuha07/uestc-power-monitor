@@ -21,6 +21,7 @@ fn print_usage() {
             "                                      有效时客户端会复用，不重复登录）\n",
             "  uestc-power-monitor login --type <password|wechat>\n",
             "                                      指定本次登录方式（默认取配置 login_type）\n",
+            "  uestc-power-monitor logout          登出当前会话并清除本地 cookie\n",
             "\n",
             "凭据与配置: 环境变量 UPM_* / 配置文件 / Docker Secrets（见 README）\n",
         )
@@ -51,13 +52,16 @@ async fn main() {
     // `--force`：强制重新登录——忽略"cookie 文件存在"捷径（凭据缺失时交互输入），
     // 并跳过本层会话探测；服务端会话实际有效时客户端会复用，不重复登录。
     // `--type <password|wechat>`：指定本次登录方式（仅覆盖本次，不改持久配置）。
+    // `logout`：登出当前会话并清除本地 cookie。
     let mut login_only = false;
+    let mut logout_only = false;
     let mut force = false;
     let mut login_type_override: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "login" => login_only = true,
+            "logout" => logout_only = true,
             "--force" => force = true,
             "--help" | "-h" => {
                 print_usage();
@@ -94,6 +98,10 @@ async fn main() {
         },
         None => None,
     };
+    if login_only && logout_only {
+        error!("`login` 与 `logout` 子命令不能同时使用");
+        std::process::exit(2);
+    }
     if (force || login_type_override.is_some()) && !login_only {
         error!("`--force`/`--type` 仅在与 `login` 子命令搭配时有效");
         print_usage();
@@ -105,8 +113,16 @@ async fn main() {
             .unwrap_or_default();
         println!("login 模式：完成登录（含二次认证）后退出{type_hint}，不进入监控循环");
     }
+    if logout_only {
+        println!("logout 模式：登出当前会话并清除本地 cookie");
+    }
 
-    if let Err(e) = uestc_power_monitor::run(login_only, force, login_type_override).await {
+    let result = if logout_only {
+        uestc_power_monitor::logout().await
+    } else {
+        uestc_power_monitor::run(login_only, force, login_type_override).await
+    };
+    if let Err(e) = result {
         error!("Error: {}", e);
         std::process::exit(1);
     }
