@@ -102,33 +102,40 @@ impl ApiService {
 
     async fn login(&self) -> Result<(), Box<dyn std::error::Error>> {
         debug!("Attempting login via {:?}", self.config.login_type);
-        match self.config.login_type {
-            LoginType::Password => {
-                let username = self.config.username.as_ref().ok_or_else(|| {
-                    "Username required for password login; cookie 会话已失效且未配置账号，\
-                     请设置 UPM_USERNAME / UPM_PASSWORD 或运行 `uestc-power-monitor --reauth` 恢复会话"
-                        .to_string()
-                })?;
-                let password = self.config.password.as_ref().ok_or_else(|| {
-                    "Password required for password login; cookie 会话已失效且未配置密码，\
-                     请设置 UPM_USERNAME / UPM_PASSWORD 或运行 `uestc-power-monitor --reauth` 恢复会话"
-                        .to_string()
-                })?;
-                match self.client.login(username, password).await {
-                    Ok(()) => {}
-                    Err(UestcClientError::ReauthRequired { context }) => {
-                        warn!("账号需要二次认证（reauth），进入交互流程");
-                        self.complete_reauth_interactive(*context).await?;
+
+        // cookie 会话仍有效时直接跳过登录——此时账号密码根本用不到
+        // （`client.login()` 内部才会探测会话，本层若先取凭据会白白拦截）。
+        if self.client.is_session_active().await {
+            debug!("Cookie session is active, skipping login");
+        } else {
+            match self.config.login_type {
+                LoginType::Password => {
+                    let username = self.config.username.as_ref().ok_or_else(|| {
+                        "Username required for password login; cookie 会话已失效且未配置账号，\
+                         请设置 UPM_USERNAME / UPM_PASSWORD 或运行 `uestc-power-monitor --reauth` 恢复会话"
+                            .to_string()
+                    })?;
+                    let password = self.config.password.as_ref().ok_or_else(|| {
+                        "Password required for password login; cookie 会话已失效且未配置密码，\
+                         请设置 UPM_USERNAME / UPM_PASSWORD 或运行 `uestc-power-monitor --reauth` 恢复会话"
+                            .to_string()
+                    })?;
+                    match self.client.login(username, password).await {
+                        Ok(()) => {}
+                        Err(UestcClientError::ReauthRequired { context }) => {
+                            warn!("账号需要二次认证（reauth），进入交互流程");
+                            self.complete_reauth_interactive(*context).await?;
+                        }
+                        Err(e) => return Err(e.into()),
                     }
-                    Err(e) => return Err(e.into()),
+                }
+                LoginType::Wechat => {
+                    self.client.wechat_login().await?;
                 }
             }
-            LoginType::Wechat => {
-                self.client.wechat_login().await?;
-            }
+            debug!("Login successful");
+            self.clear_login_retry_failure();
         }
-        debug!("Login successful");
-        self.clear_login_retry_failure();
 
         // Initialize session with forced CAS authentication
         let init_url = "https://online.uestc.edu.cn/common/actionCasLogin?redirect_url=https://online.uestc.edu.cn/page/";
