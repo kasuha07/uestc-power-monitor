@@ -6,7 +6,7 @@ pub mod time;
 pub mod utils;
 
 use crate::api::ApiService;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, LoginType};
 use crate::db::DbService;
 use crate::notify::NotificationManager;
 use crate::time::DEFAULT_TIMEZONE;
@@ -16,7 +16,11 @@ use tokio::time::sleep;
 
 use tracing::{debug, error, info, warn};
 
-pub async fn run(login_only: bool, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(
+    login_only: bool,
+    force: bool,
+    login_type_override: Option<LoginType>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = match AppConfig::new() {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -24,6 +28,12 @@ pub async fn run(login_only: bool, force: bool) -> Result<(), Box<dyn std::error
             return Err(e.into());
         }
     };
+
+    // `login --type`：本次登录方式覆盖配置（仅对 login 模式生效，main.rs 已校验），
+    // 只影响本次会话，不写回配置文件/环境变量。
+    if let Some(login_type) = login_type_override {
+        config.login_type = login_type;
+    }
 
     // 凭据缺失时交互式输入（仅当 stdin 为终端时生效，否则报错提示改用环境变量等）
     // `force`（`login --force`）时忽略 cookie 捷径，强制要求凭据。

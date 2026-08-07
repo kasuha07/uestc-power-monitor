@@ -63,7 +63,8 @@ pub struct ApiService {
     client: UestcClient,
     config: AppConfig,
     login_throttle: LoginThrottle,
-    /// `login --force`：忽略现有 cookie 会话强制重新登录（不探测会话有效性）。
+    /// `login --force`：忽略"cookie 文件存在"捷径强制走登录流程（跳过本层会话探测；
+    /// 服务端会话实际有效时客户端内部会复用，不重复登录）。
     force_login: bool,
     /// 本轮取数周期内是否发生过重新登录失败（含被节流拒绝）。
     /// 由 `lib.rs` 在取数失败后读取并清除，用于区分"登录重试失败"

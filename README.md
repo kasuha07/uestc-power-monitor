@@ -234,7 +234,10 @@ UESTC 统一认证启用了多因子策略：密码登录成功后会被 302 到
 - **人工恢复**：在终端运行 `uestc-power-monitor login`（登录 + 交互完成 reauth
   + 保存 cookie 后退出，不进入监控循环；会话已有效时幂等通过）。会话失效且未
   配置账号密码时，普通 `login` 会因缺少凭据报错，请改用 `uestc-power-monitor
-  login --force`：忽略现有 cookie 强制重新登录，并交互提示输入账号密码。
+  login --force`：忽略"cookie 文件存在"捷径强制重新登录，并交互提示输入账号密码
+  （服务端会话实际仍有效时，客户端会直接复用现有会话，不会重复登录）。
+  `login --type <password|wechat>` 可指定本次登录方式（默认取配置 `login_type`），
+  例如 `uestc-power-monitor login --type wechat` 走微信扫码登录。
   daemon 会在下个轮询周期检测到会话恢复，自动继续监控并发送 `ReauthResolved`
   确认通知。
 - 相关配置：`reauth_trust_device`（可信设备弹窗）、`notify.reauth_pending_*`、

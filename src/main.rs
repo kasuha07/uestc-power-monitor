@@ -1,6 +1,7 @@
 use tracing::error;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::FormatTime;
+use uestc_power_monitor::config::LoginType;
 use uestc_power_monitor::time;
 
 // Custom time formatter that uses application timezone (defaults to Asia/Shanghai)
@@ -15,7 +16,11 @@ fn print_usage() {
             "  uestc-power-monitor                启动监控（默认）\n",
             "  uestc-power-monitor login          登录并交互完成二次认证（reauth）后退出；\n",
             "                                      会话有效时直接通过（幂等）\n",
-            "  uestc-power-monitor login --force  忽略现有会话强制重新登录（凭据缺失时交互输入）\n",
+            "  uestc-power-monitor login --force  强制重新登录（忽略 cookie 文件捷径，\n",
+            "                                      凭据缺失时交互输入；服务端会话实际\n",
+            "                                      有效时客户端会复用，不重复登录）\n",
+            "  uestc-power-monitor login --type <password|wechat>\n",
+            "                                      指定本次登录方式（默认取配置 login_type）\n",
             "\n",
             "凭据与配置: 环境变量 UPM_* / 配置文件 / Docker Secrets（见 README）\n",
         )
@@ -43,10 +48,14 @@ async fn main() {
 
     // `login`：只完成登录（必要时交互完成 reauth）+ 保存 cookie 后退出，
     // 供无人值守 daemon 会话失效后人工恢复使用（需在终端运行）。
-    // `--force`：忽略现有 cookie 会话强制重新登录。
+    // `--force`：强制重新登录——忽略"cookie 文件存在"捷径（凭据缺失时交互输入），
+    // 并跳过本层会话探测；服务端会话实际有效时客户端会复用，不重复登录。
+    // `--type <password|wechat>`：指定本次登录方式（仅覆盖本次，不改持久配置）。
     let mut login_only = false;
     let mut force = false;
-    for arg in std::env::args().skip(1) {
+    let mut login_type_override: Option<String> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "login" => login_only = true,
             "--force" => force = true,
@@ -54,23 +63,50 @@ async fn main() {
                 print_usage();
                 return;
             }
+            "--type" => {
+                let value = match args.next() {
+                    Some(value) => value,
+                    None => {
+                        error!("`--type` 缺少取值（可选: password / wechat）");
+                        std::process::exit(2);
+                    }
+                };
+                login_type_override = Some(value);
+            }
             other => {
-                error!("未知参数: {other}");
-                print_usage();
-                std::process::exit(2);
+                if let Some(value) = other.strip_prefix("--type=") {
+                    login_type_override = Some(value.to_string());
+                } else {
+                    error!("未知参数: {other}");
+                    print_usage();
+                    std::process::exit(2);
+                }
             }
         }
     }
-    if force && !login_only {
-        error!("`--force` 仅在与 `login` 子命令搭配时有效");
+    let login_type_override = match login_type_override {
+        Some(value) => match LoginType::parse(&value) {
+            Ok(login_type) => Some(login_type),
+            Err(msg) => {
+                error!("{msg}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+    if (force || login_type_override.is_some()) && !login_only {
+        error!("`--force`/`--type` 仅在与 `login` 子命令搭配时有效");
         print_usage();
         std::process::exit(2);
     }
     if login_only {
-        println!("login 模式：完成登录（含二次认证）后退出，不进入监控循环");
+        let type_hint = login_type_override
+            .map(|t| format!("，登录方式: {:?}", t))
+            .unwrap_or_default();
+        println!("login 模式：完成登录（含二次认证）后退出{type_hint}，不进入监控循环");
     }
 
-    if let Err(e) = uestc_power_monitor::run(login_only, force).await {
+    if let Err(e) = uestc_power_monitor::run(login_only, force, login_type_override).await {
         error!("Error: {}", e);
         std::process::exit(1);
     }

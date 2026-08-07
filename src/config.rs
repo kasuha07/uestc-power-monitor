@@ -14,6 +14,17 @@ pub enum LoginType {
     Wechat,
 }
 
+impl LoginType {
+    /// 解析 `login --type` 命令行取值（与 serde 的 lowercase 命名一致）。
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "password" => Ok(LoginType::Password),
+            "wechat" => Ok(LoginType::Wechat),
+            other => Err(format!("未知登录方式: {other}（可选: password / wechat）")),
+        }
+    }
+}
+
 fn default_cookie_file() -> String {
     "uestc_cookies.json".to_string()
 }
@@ -1163,6 +1174,18 @@ heartbeat_hours = 8
                 .expect("secret should resolve"),
             "uestc-power-monitor:alice:secret"
         );
+    }
+
+    #[test]
+    fn login_type_parse_accepts_known_values() {
+        assert_eq!(LoginType::parse("password"), Ok(LoginType::Password));
+        assert_eq!(LoginType::parse("wechat"), Ok(LoginType::Wechat));
+    }
+
+    #[test]
+    fn login_type_parse_rejects_unknown_values() {
+        let err = LoginType::parse("sms").expect_err("should reject");
+        assert!(err.contains("未知登录方式"));
     }
 
     #[test]
