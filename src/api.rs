@@ -571,38 +571,87 @@ fn classify_body(
     byte_len: usize,
     text: &str,
 ) -> Result<PowerResponse, FetchError> {
-    // 状态码非 2xx 也先按业务信封解析：上游会用 5xx 包着 {"e":401,...}，
-    // 那种情况必须走到 `resp.error == 401` 的重新登录逻辑上去。
-    let shape_error = match serde_json::from_str::<ApiResponse<PowerInfo>>(text) {
-        Ok(body) => {
-            if !status.is_success() {
-                debug!(
-                    "HTTP {} carried a valid response envelope, continuing with it",
-                    status
-                );
-            }
-            return Ok(PowerResponse { status, body });
+    // 先确定响应体是不是 JSON（决定 Shape 与 Status/NotJson 的边界）。
+    let whole: serde_json::Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        // 根本不是 JSON：只报形态，绝不 dump 内容。
+        Err(_) if !status.is_success() => {
+            return Err(FetchError::Status {
+                status,
+                body: describe_opaque_body(content_type, byte_len, text),
+            });
         }
-        Err(e) => e.to_string(),
+        Err(_) => {
+            return Err(FetchError::NotJson {
+                status,
+                body: describe_opaque_body(content_type, byte_len, text),
+            });
+        }
     };
 
-    // 结构不符但确实是 JSON：内容可安全入日志，且重新序列化会转义控制字符，
-    // 顺带挡掉借响应体伪造日志行（CRLF 注入）的可能。
-    match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(value) => Err(FetchError::Shape {
+    // 再按宽松信封解析（`d` 暂不校验类型），再按 `d` 的形态分流：对象 →
+    // PowerInfo；null → 无数据；字符串 → 上游业务失败（如 "失败{...}"）。
+    // 状态码非 2xx 也先按业务信封解析：上游会用 5xx 包着 {"e":401,...}，
+    // 那种情况必须走到 `resp.error == 401` 的重新登录逻辑上去。
+    let ApiResponse {
+        error,
+        message,
+        data,
+    } = match serde_json::from_value::<ApiResponse<serde_json::Value>>(whole.clone()) {
+        Ok(envelope) => envelope,
+        // 结构不符但确实是 JSON：内容可安全入日志，且重新序列化会转义控制字符，
+        // 顺带挡掉借响应体伪造日志行（CRLF 注入）的可能。
+        Err(detail) => {
+            return Err(FetchError::Shape {
+                status,
+                envelope: describe_envelope(&whole),
+                detail: detail.to_string(),
+                snippet: json_snippet(&whole),
+            });
+        }
+    };
+
+    match data.as_ref() {
+        // 无数据（如未绑定房间），交给调用方决定。
+        None => Ok(PowerResponse {
             status,
-            envelope: describe_envelope(&value),
-            detail: shape_error,
-            snippet: json_snippet(&value),
+            body: ApiResponse {
+                error,
+                message,
+                data: None,
+            },
         }),
-        // 根本不是 JSON：只报形态，绝不 dump 内容。
-        Err(_) if !status.is_success() => Err(FetchError::Status {
+        // 对象 → 按 PowerInfo 严格解析（核心电量字段缺失宁可报错也不编造）。
+        Some(serde_json::Value::Object(_)) => {
+            match serde_json::from_value::<PowerInfo>(data.unwrap()) {
+                Ok(info) => Ok(PowerResponse {
+                    status,
+                    body: ApiResponse {
+                        error,
+                        message,
+                        data: Some(info),
+                    },
+                }),
+                Err(detail) => Err(FetchError::Shape {
+                    status,
+                    envelope: describe_envelope(&whole),
+                    detail: detail.to_string(),
+                    snippet: json_snippet(&whole),
+                }),
+            }
+        }
+        // 字符串 → 上游业务失败（见 `describe_business_payload`）。
+        Some(serde_json::Value::String(payload)) => Err(FetchError::Business {
             status,
-            body: describe_opaque_body(content_type, byte_len, text),
+            message,
+            payload: describe_business_payload(&payload),
         }),
-        Err(_) => Err(FetchError::NotJson {
+        // 其它类型（数字/数组/bool）→ 结构不符。
+        Some(other) => Err(FetchError::Shape {
             status,
-            body: describe_opaque_body(content_type, byte_len, text),
+            envelope: describe_envelope(&whole),
+            detail: format!("d is {} instead of an object", json_type_name(&other)),
+            snippet: json_snippet(&whole),
         }),
     }
 }
@@ -625,6 +674,18 @@ enum FetchError {
         envelope: String,
         detail: String,
         snippet: String,
+    },
+    /// 信封正常（e/m 可解析），但业务层明确返回了失败：`d` 是字符串而非
+    /// 数据对象。UESTC 电费网关业务失败时返回 `"d":"失败{...}"` —— "失败"
+    /// 前缀后跟着一段携带诊断信息的 JSON（房间号、防重放时间戳、内网直连
+    /// 重试地址、res_hash）。不是会话问题（信封 `e=0`），重登无济于事；
+    /// 缺失的读数照常计入连续抓取失败，恢复依赖下一轮轮询。
+    Business {
+        status: StatusCode,
+        /// 信封的 `m`（业务消息，反序列化时已清理控制字符）。
+        message: String,
+        /// `d` 字符串的脱敏诊断摘要（房间号/重试地址等，不含密文与签名材料）。
+        payload: String,
     },
     /// 响应体超过 `MAX_BODY_BYTES`，已放弃读取。
     TooLarge {
@@ -671,6 +732,9 @@ impl FetchError {
             FetchError::Status { status, .. } | FetchError::Shape { status, .. } => {
                 session_expired_status(*status)
             }
+            // `Business` 是明确的业务失败语义，但 HTTP 401/403 配业务失败时
+            // 状态码本身就是鉴权信号，与 `Shape` 同规则处理。
+            FetchError::Business { status, .. } => session_expired_status(*status),
         }
     }
 }
@@ -701,6 +765,17 @@ impl fmt::Display for FetchError {
                 f,
                 "response JSON did not match the expected shape (HTTP {}): {} [{}] body={}",
                 status, detail, envelope, snippet
+            ),
+            FetchError::Business {
+                status,
+                message,
+                payload,
+            } => write!(
+                f,
+                "electricity service reported a business failure (HTTP {}, m=\"{}\"): d is a string ({})",
+                status,
+                truncate_for_log(message, MAX_LOGGED_FIELD),
+                payload
             ),
             FetchError::TooLarge {
                 status,
@@ -900,6 +975,57 @@ fn json_type_name(value: &serde_json::Value) -> &'static str {
         serde_json::Value::String(_) => "a string",
         serde_json::Value::Array(_) => "an array",
         serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// `d` 为字符串时的脱敏诊断摘要。
+///
+/// 识别 `"失败{...}"` 形态：剥离前缀后按 JSON 解析，只提取诊断字段（房间号、
+/// 重试地址的主机与端口、res_hash）。str3/str4/sign/data 是服务端生成的一次性
+/// 密文与签名材料，不进日志。不是该形态的字符串只报形态与长度，不 dump 内容。
+fn describe_business_payload(raw: &str) -> String {
+    let inner = raw.strip_prefix("失败").unwrap_or(raw);
+    let value: serde_json::Value = match serde_json::from_str(inner) {
+        Ok(value) => value,
+        // 不是 "失败{json}" 形态：只报形态与长度，不 dump 内容。
+        Err(_) => return format!("{} chars of non-JSON text", raw.chars().count()),
+    };
+
+    let serde_json::Value::Object(map) = &value else {
+        return format!("non-object payload ({})", json_type_name(&value));
+    };
+
+    let mut parts = Vec::new();
+    // 房间标识：fjh=门牌号，dffjbh=控电房间编号。
+    if let (Some(fjh), Some(dffjbh)) = (map.get("fjh"), map.get("dffjbh")) {
+        parts.push(format!(
+            "room {}/{}",
+            bounded_field(fjh),
+            bounded_field(dffjbh)
+        ));
+    }
+    // 重试地址只留主机[:端口] —— query 里的 sign/data 是签名材料，不进日志。
+    if let Some(url) = map.get("url").and_then(|v| v.as_str()) {
+        let authority = url
+            .split("://")
+            .nth(1)
+            .and_then(|rest| rest.split(['/', '?', '#']).next())
+            .filter(|a| !a.is_empty());
+        if let Some(authority) = authority {
+            parts.push(format!(
+                "retry endpoint {}",
+                truncate_for_log(authority, MAX_LOGGED_FIELD)
+            ));
+        }
+    }
+    if let Some(res_hash) = map.get("res_hash") {
+        parts.push(format!("res_hash={}", bounded_field(res_hash)));
+    }
+
+    if parts.is_empty() {
+        "no diagnostic fields".to_string()
+    } else {
+        parts.join(", ")
     }
 }
 
@@ -1272,6 +1398,78 @@ mod tests {
         assert!(rendered.contains("d.retcode=-1"), "got: {}", rendered);
         assert!(matches!(err, FetchError::Shape { .. }), "got: {:?}", err);
         // 请求到达了业务接口，重新登录改变不了返回内容。
+        assert!(!err.session_may_be_stale());
+    }
+
+    /// 线上真实样本：电费网关业务失败时返回 `"d":"失败{...}"`，内层 JSON
+    /// 携带诊断信息与内网直连重试地址（密文与签名已打码）。
+    const BUSINESS_FAILURE_BODY: &str = r#"{"d":"失败{\"fjh\":\"407\",\"dffjbh\":\"220407\",\"str2\":\"220407_20260807102647\",\"str3\":\"<ciphertext>\",\"str4\":\"<signature>\",\"sign\":\"<signature>\",\"data\":\"<ciphertext>\",\"url\":\"http:\/\/222.197.164.98:7000\/zxapi\/services\/query\/findeletric?sign=<signature>&data=<ciphertext>\",\"res_hash\":null}","e":0,"m":"操作成功"}"#;
+
+    #[test]
+    fn classify_body_reports_business_failures_with_readable_details() {
+        // 线上症状：d 是 "失败{...}" 字符串，信封本身 e=0（不是会话问题）。
+        let err = classify_body(
+            StatusCode::OK,
+            "application/json",
+            BUSINESS_FAILURE_BODY.len(),
+            BUSINESS_FAILURE_BODY,
+        )
+        .expect_err("business failure must fail");
+
+        assert!(matches!(err, FetchError::Business { .. }), "got: {:?}", err);
+        let rendered = err.to_string();
+        assert!(rendered.contains("business failure"), "got: {}", rendered);
+        assert!(
+            rendered.contains("room \"407\"/\"220407\""),
+            "got: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("222.197.164.98:7000"),
+            "got: {}",
+            rendered
+        );
+        assert!(rendered.contains("res_hash=null"), "got: {}", rendered);
+        // 信封 e=0：不是会话问题，重新登录无济于事。
+        assert!(!err.session_may_be_stale());
+        // 密文与签名材料不进日志。
+        assert!(!rendered.contains("<ciphertext>"), "leaked: {}", rendered);
+        assert!(!rendered.contains("<signature>"), "leaked: {}", rendered);
+    }
+
+    #[test]
+    fn classify_body_reports_plain_string_payloads_without_dumping_them() {
+        // 不是 "失败{json}" 形态的字符串：只报形态与长度，不 dump 内容。
+        let err = classify_body(
+            StatusCode::OK,
+            "application/json",
+            BUSINESS_FAILURE_BODY.len(),
+            BUSINESS_FAILURE_BODY,
+        )
+        .expect_err("business failure must fail");
+        assert!(matches!(err, FetchError::Business { .. }), "got: {:?}", err);
+
+        let text = r#"{"e":0,"m":"ok","d":"会话已过期，请重新登录电费系统"}"#;
+        let err = classify_body(StatusCode::OK, "application/json", text.len(), text)
+            .expect_err("a string payload is a business failure");
+        assert!(matches!(err, FetchError::Business { .. }), "got: {:?}", err);
+        let rendered = err.to_string();
+        assert!(rendered.contains("non-JSON text"), "got: {}", rendered);
+        assert!(
+            !rendered.contains("会话已过期"),
+            "should not dump the payload: {}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn classify_body_rejects_non_object_payloads_as_shape_errors() {
+        // d 是数组/数字等其它类型：结构不符，归 Shape（200 下不触发重登）。
+        let text = r#"{"e":0,"m":"ok","d":[1,2,3]}"#;
+        let err = classify_body(StatusCode::OK, "application/json", text.len(), text)
+            .expect_err("array payload must fail");
+        assert!(matches!(err, FetchError::Shape { .. }), "got: {:?}", err);
+        assert!(err.to_string().contains("d is an array"), "got: {}", err);
         assert!(!err.session_may_be_stale());
     }
 
