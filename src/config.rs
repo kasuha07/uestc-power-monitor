@@ -591,6 +591,9 @@ impl AppConfig {
     /// 交互式补全缺失的登录凭据（仅在凭据缺失且 stdin 为终端时提示输入）。
     ///
     /// - `password` 登录：`username` / `password` 缺失（或为空）时依次提示输入；
+    ///   但若 cookie 文件已存在且非空、且加密密钥可解析（显式 key 或账号密码派生），
+    ///   则跳过提示——运行时 `login()` 会先探测会话（`is_session_active`），
+    ///   会话有效时根本用不到账号密码；
     /// - `wechat` 登录：`cookie_encryption_key` 缺失时提示输入（密码方式隐藏回显）。
     ///
     /// 标准输入不是终端（如 systemd、CI、Docker 无 TTY 环境）时直接报错，避免进程
@@ -599,6 +602,14 @@ impl AppConfig {
     pub fn prompt_for_credentials(&mut self) -> Result<(), String> {
         let missing: Vec<&'static str> = match self.login_type {
             LoginType::Password => {
+                // cookie 文件已存在且非空、加密密钥可解析（显式 key 或账号密码派生）时，
+                // 跳过账号密码提示：会话有效则用不到账号密码；会话已失效时登录会明确报错
+                // （提示配置环境变量或运行 `--reauth`），而不是挂起等待交互输入。
+                if fs::metadata(&self.cookie_file).is_ok_and(|m| m.len() > 0)
+                    && self.cookie_encryption_secret().is_ok()
+                {
+                    return Ok(());
+                }
                 let mut missing = Vec::new();
                 if self
                     .username
@@ -973,6 +984,67 @@ heartbeat_hours = 8
 
         let err = cfg.validate().expect_err("validation should fail");
         assert!(err.to_string().contains("interval_seconds"));
+    }
+
+    #[test]
+    fn prompt_for_credentials_skips_when_cookie_file_exists_with_key() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock config test mutex");
+        let _guard = setup_test_config("database_url = \"sqlite://test.db\"\n", None);
+
+        // password 登录、无账号密码、有显式加密 key、cookie 文件已存在 → 应跳过提示
+        let mut cfg = valid_app_config();
+        cfg.username = None;
+        cfg.password = None;
+        cfg.cookie_encryption_key = Some("explicit-secret".to_string());
+        cfg.cookie_file = std::env::current_dir()
+            .expect("current dir")
+            .join("cookies.json")
+            .display()
+            .to_string();
+        std::fs::write(&cfg.cookie_file, b"{}").expect("write cookie file");
+
+        cfg.prompt_for_credentials()
+            .expect("cookie 文件存在且密钥可解析时应跳过凭据提示");
+    }
+
+    #[test]
+    fn prompt_for_credentials_requires_credentials_without_cookie_file() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock config test mutex");
+        let _guard = setup_test_config("database_url = \"sqlite://test.db\"\n", None);
+
+        // 无 cookie 文件、无显式 key → 应要求凭据；stdin 非终端时直接报错而非挂起
+        let mut cfg = valid_app_config();
+        cfg.username = None;
+        cfg.password = None;
+        cfg.cookie_encryption_key = None;
+
+        let err = cfg
+            .prompt_for_credentials()
+            .expect_err("无 cookie 文件时应要求凭据");
+        assert!(err.contains("标准输入不是终端"));
+    }
+
+    #[test]
+    fn prompt_for_credentials_empty_cookie_file_still_requires_credentials() {
+        let _lock = CONFIG_TEST_MUTEX.lock().expect("lock config test mutex");
+        let _guard = setup_test_config("database_url = \"sqlite://test.db\"\n", None);
+
+        // 空 cookie 文件视为不存在：避免跳过提示后运行时才发现 cookie 不可用
+        let mut cfg = valid_app_config();
+        cfg.username = None;
+        cfg.password = None;
+        cfg.cookie_encryption_key = Some("explicit-secret".to_string());
+        cfg.cookie_file = std::env::current_dir()
+            .expect("current dir")
+            .join("cookies.json")
+            .display()
+            .to_string();
+        std::fs::write(&cfg.cookie_file, b"").expect("write empty cookie file");
+
+        let err = cfg
+            .prompt_for_credentials()
+            .expect_err("空 cookie 文件不应跳过凭据提示");
+        assert!(err.contains("标准输入不是终端"));
     }
 
     #[test]

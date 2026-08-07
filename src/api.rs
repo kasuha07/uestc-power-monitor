@@ -104,16 +104,16 @@ impl ApiService {
         debug!("Attempting login via {:?}", self.config.login_type);
         match self.config.login_type {
             LoginType::Password => {
-                let username = self
-                    .config
-                    .username
-                    .as_ref()
-                    .ok_or_else(|| "Username required for password login".to_string())?;
-                let password = self
-                    .config
-                    .password
-                    .as_ref()
-                    .ok_or_else(|| "Password required for password login".to_string())?;
+                let username = self.config.username.as_ref().ok_or_else(|| {
+                    "Username required for password login; cookie 会话已失效且未配置账号，\
+                     请设置 UPM_USERNAME / UPM_PASSWORD 或运行 `uestc-power-monitor --reauth` 恢复会话"
+                        .to_string()
+                })?;
+                let password = self.config.password.as_ref().ok_or_else(|| {
+                    "Password required for password login; cookie 会话已失效且未配置密码，\
+                     请设置 UPM_USERNAME / UPM_PASSWORD 或运行 `uestc-power-monitor --reauth` 恢复会话"
+                        .to_string()
+                })?;
                 match self.client.login(username, password).await {
                     Ok(()) => {}
                     Err(UestcClientError::ReauthRequired { context }) => {
