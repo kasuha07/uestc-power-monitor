@@ -17,11 +17,15 @@ use uestc_client::UestcClient;
 
 use tracing::{debug, error, info, warn};
 
-/// `logout` 子命令：登出当前会话并清除本地 cookie 文件。
+/// `logout` 子命令：结束服务端会话。
 ///
-/// 无 cookie 文件时直接通过（无需登出）；cookie 加密密钥无法解析时
-/// 报错并提示手动删除 cookie 文件（此时无法解密 cookie、发不出登出请求）。
-pub async fn logout() -> Result<(), Box<dyn std::error::Error>> {
+/// - 默认：只登出，**保留本地 cookie 文件**（含设备指纹 cookie，下次登录仍被
+///   服务端识别为可信设备，免 reauth 弹窗）；
+/// - `clear = true`（`logout --clear`）：登出并删除本地 cookie 文件（含指纹，
+///   下次登录视为新设备）；登出接口失败（如会话已失效）时仍清除本地文件。
+///
+/// 无 cookie 文件时直接通过。
+pub async fn logout(clear: bool) -> Result<(), Box<dyn std::error::Error>> {
     let config = match AppConfig::new() {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -31,7 +35,7 @@ pub async fn logout() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if !std::path::Path::new(&config.cookie_file).exists() {
-        info!("未找到 cookie 文件（{}），无需登出", config.cookie_file);
+        info!("未找到 cookie 文件（{}），无需处理", config.cookie_file);
         return Ok(());
     }
 
@@ -47,8 +51,28 @@ pub async fn logout() -> Result<(), Box<dyn std::error::Error>> {
         &config.cookie_file,
         cookie_encryption_secret.as_bytes(),
     );
-    client.logout().await?;
-    info!("已登出，本地 cookie 已清除");
+    if let Err(e) = client.logout().await {
+        if clear {
+            warn!("登出接口调用失败（{e}），仍继续清除本地 cookie");
+        } else {
+            return Err(e.into());
+        }
+    }
+    if clear {
+        // 损坏的 cookie 文件可能在 client 构造时已被自动删除，这里容忍不存在。
+        let cookie_path = std::path::Path::new(&config.cookie_file);
+        if cookie_path.exists() {
+            std::fs::remove_file(cookie_path).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("删除 cookie 文件失败: {e}"),
+                )
+            })?;
+        }
+        info!("已登出并清除本地 cookie（含设备指纹，下次登录视为新设备）");
+    } else {
+        info!("已登出（本地 cookie 与设备指纹保留）");
+    }
     Ok(())
 }
 

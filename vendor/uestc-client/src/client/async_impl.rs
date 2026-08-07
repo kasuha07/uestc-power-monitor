@@ -15,6 +15,10 @@ use std::sync::Arc;
 
 const DEFAULT_COOKIE_FILE: &str = "uestc_cookies.json";
 
+/// 设备指纹 cookie 名：服务端种下的 HttpOnly 持久 cookie，
+/// 作为多因子风控的"可信设备"标识（见 `core::bfp`）。
+pub(crate) const MULTIFACTOR_FINGERPRINT_COOKIE: &str = "MULTIFACTOR_BROWSER_FINGERPRINT";
+
 pub struct UestcClient {
     client: Client,
     cookie_store: Arc<CookieStoreMutex>,
@@ -90,12 +94,14 @@ impl UestcClient {
             .build()
             .expect("Failed to build client");
 
+        let bfp_fingerprint = Self::fingerprint_from_cookie_store(&cookie_store);
+
         Self {
             client,
             cookie_store,
             cookie_file,
             cookie_encryption_secret,
-            bfp_fingerprint: core::bfp::random_fingerprint(),
+            bfp_fingerprint,
         }
     }
 
@@ -108,6 +114,21 @@ impl UestcClient {
             cookie_encryption_secret: None,
             bfp_fingerprint: core::bfp::random_fingerprint(),
         }
+    }
+
+    /// 复用 cookie store 中已持久化的设备指纹（无则随机生成）。
+    /// 指纹是"可信设备"标识：只有每次上报同值，服务端才能持续识别
+    /// 本机为可信设备——退出登录后保留的指纹 cookie 因此继续有效。
+    fn fingerprint_from_cookie_store(cookie_store: &Arc<CookieStoreMutex>) -> String {
+        cookie_store
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter_any()
+            .find(|c| c.name() == MULTIFACTOR_FINGERPRINT_COOKIE)
+            .map(|c| c.value())
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(core::bfp::random_fingerprint)
     }
 
     fn save_cookie_store(&self) -> Result<()> {
@@ -249,10 +270,10 @@ impl UestcClient {
 
         if resp.status().is_success() {
             log::info!("Logout successful");
-            // Clear cookies after logout
-            if let Err(e) = std::fs::remove_file(&self.cookie_file) {
-                log::warn!("Failed to delete cookie file after logout: {}", e);
-            }
+            // 只结束服务端会话，**不清理本地 cookie 文件**：设备指纹 cookie
+            // （MULTIFACTOR_BROWSER_FINGERPRINT）保留后，下次登录复用同值上报，
+            // 服务端仍识别本机为可信设备（免 reauth 弹窗）。需要彻底清除本地
+            // cookie（含指纹）时，由调用方自行删除 cookie 文件。
             return Ok(());
         }
 
@@ -805,6 +826,34 @@ fn is_reauth_url(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprint_reused_from_store() {
+        let store = Arc::new(CookieStoreMutex::new(CookieStore::default()));
+        let url = url::Url::parse("https://idas.uestc.edu.cn/").expect("parse url");
+        let cookie = cookie_store::Cookie::parse(
+            "MULTIFACTOR_BROWSER_FINGERPRINT=ABCDEF0123456789ABCDEF0123456789; Path=/; HttpOnly",
+            &url,
+        )
+        .expect("parse cookie");
+        store
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(cookie, &url);
+
+        assert_eq!(
+            UestcClient::fingerprint_from_cookie_store(&store),
+            "ABCDEF0123456789ABCDEF0123456789"
+        );
+    }
+
+    #[test]
+    fn fingerprint_generated_when_store_has_none() {
+        let store = Arc::new(CookieStoreMutex::new(CookieStore::default()));
+        let fp = UestcClient::fingerprint_from_cookie_store(&store);
+        assert_eq!(fp.len(), 32);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 
     #[tokio::test]
     async fn test_new() {

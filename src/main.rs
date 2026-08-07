@@ -21,7 +21,10 @@ fn print_usage() {
             "                                      有效时客户端会复用，不重复登录）\n",
             "  uestc-power-monitor login --type <password|wechat>\n",
             "                                      指定本次登录方式（默认取配置 login_type）\n",
-            "  uestc-power-monitor logout          登出当前会话并清除本地 cookie\n",
+            "  uestc-power-monitor logout          登出当前会话（保留本地 cookie 与\n",
+            "                                      设备指纹，下次登录仍识别为可信设备）\n",
+            "  uestc-power-monitor logout --clear  登出并彻底清除本地 cookie（含设备指纹，\n",
+            "                                      下次登录视为新设备）\n",
             "\n",
             "凭据与配置: 环境变量 UPM_* / 配置文件 / Docker Secrets（见 README）\n",
         )
@@ -52,16 +55,18 @@ async fn main() {
     // `--force`：强制重新登录——忽略"cookie 文件存在"捷径（凭据缺失时交互输入），
     // 并跳过本层会话探测；服务端会话实际有效时客户端会复用，不重复登录。
     // `--type <password|wechat>`：指定本次登录方式（仅覆盖本次，不改持久配置）。
-    // `logout`：登出当前会话并清除本地 cookie。
+    // `logout`：登出当前会话；默认保留本地 cookie（含设备指纹），`--clear` 彻底清除。
     let mut login_only = false;
     let mut logout_only = false;
     let mut force = false;
+    let mut clear = false;
     let mut login_type_override: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "login" => login_only = true,
             "logout" => logout_only = true,
+            "--clear" => clear = true,
             "--force" => force = true,
             "--help" | "-h" => {
                 print_usage();
@@ -107,6 +112,11 @@ async fn main() {
         print_usage();
         std::process::exit(2);
     }
+    if clear && !logout_only {
+        error!("`--clear` 仅在与 `logout` 子命令搭配时有效");
+        print_usage();
+        std::process::exit(2);
+    }
     if login_only {
         let type_hint = login_type_override
             .map(|t| format!("，登录方式: {:?}", t))
@@ -114,11 +124,15 @@ async fn main() {
         println!("login 模式：完成登录（含二次认证）后退出{type_hint}，不进入监控循环");
     }
     if logout_only {
-        println!("logout 模式：登出当前会话并清除本地 cookie");
+        println!("logout 模式：登出当前会话（{}）", if clear {
+            "并清除本地 cookie".to_string()
+        } else {
+            "保留本地 cookie".to_string()
+        });
     }
 
     let result = if logout_only {
-        uestc_power_monitor::logout().await
+        uestc_power_monitor::logout(clear).await
     } else {
         uestc_power_monitor::run(login_only, force, login_type_override).await
     };

@@ -91,12 +91,14 @@ impl UestcBlockingClient {
             .build()
             .expect("Failed to build client");
 
+        let bfp_fingerprint = Self::fingerprint_from_cookie_store(&cookie_store);
+
         Self {
             client,
             cookie_store,
             cookie_file,
             cookie_encryption_secret,
-            bfp_fingerprint: core::bfp::random_fingerprint(),
+            bfp_fingerprint,
         }
     }
 
@@ -109,6 +111,22 @@ impl UestcBlockingClient {
             cookie_encryption_secret: None,
             bfp_fingerprint: core::bfp::random_fingerprint(),
         }
+    }
+
+    /// 复用 cookie store 中已持久化的设备指纹（无则随机生成）。
+    /// 与 async_impl 保持一致：指纹是"可信设备"标识，只有每次上报同值，
+    /// 服务端才能持续识别本机为可信设备——退出登录后保留的指纹 cookie
+    /// 因此继续有效。
+    fn fingerprint_from_cookie_store(cookie_store: &Arc<CookieStoreMutex>) -> String {
+        cookie_store
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter_any()
+            .find(|c| c.name() == super::async_impl::MULTIFACTOR_FINGERPRINT_COOKIE)
+            .map(|c| c.value())
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(core::bfp::random_fingerprint)
     }
 
     fn save_cookie_store(&self) -> Result<()> {
@@ -250,10 +268,10 @@ impl UestcBlockingClient {
 
         if resp.status().is_success() {
             log::info!("Logout successful");
-            // Clear cookies after logout
-            if let Err(e) = std::fs::remove_file(&self.cookie_file) {
-                log::warn!("Failed to delete cookie file after logout: {}", e);
-            }
+            // 只结束服务端会话，**不清理本地 cookie 文件**：设备指纹 cookie
+            // （MULTIFACTOR_BROWSER_FINGERPRINT）保留后，下次登录复用同值上报，
+            // 服务端仍识别本机为可信设备（免 reauth 弹窗）。需要彻底清除本地
+            // cookie（含指纹）时，由调用方自行删除 cookie 文件。
             return Ok(());
         }
 
