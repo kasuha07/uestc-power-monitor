@@ -3,10 +3,11 @@ use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::io::{self, IsTerminal, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
-use uestc_client::UestcClient;
+use uestc_client::{ReauthContext, ReauthMethod, ReauthMethodKind, UestcClient, UestcClientError};
 
 const BASE_URL: &str = "https://online.uestc.edu.cn/site";
 
@@ -26,6 +27,38 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 /// 判断响应体形态时只嗅探开头这么多字符，避免复制整个响应体。
 const MAX_SNIFFED_CHARS: usize = 1024;
 
+/// 需要人工完成 reauth（多因子二次认证）——无人值守环境（stdin 非终端）
+/// 无法交互完成第二因素。`relogin` 用它区分"需要人工"与"登录失败"：
+/// 前者进入等待模式（ReauthPending 通知 + 定期探测恢复），后者走既有
+/// `LoginRetryFailure` 路径。
+#[derive(Debug)]
+pub(crate) struct ReauthPendingError;
+
+impl fmt::Display for ReauthPendingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "需要人工完成二次认证（reauth），请在终端运行 `uestc-power-monitor --reauth`"
+        )
+    }
+}
+
+impl std::error::Error for ReauthPendingError {}
+
+/// 读取一行终端输入（供 reauth 交互选择/输入验证码；config.rs 的凭据输入
+/// 有同款实现，此处复用同一风格）。
+fn prompt_line(prompt: &str) -> Result<String, String> {
+    print!("{prompt}");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("刷新终端输出失败: {e}"))?;
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("读取输入失败: {e}"))?;
+    Ok(line.trim().to_string())
+}
+
 pub struct ApiService {
     client: UestcClient,
     config: AppConfig,
@@ -35,6 +68,10 @@ pub struct ApiService {
     /// 与"普通网络失败"——前者走 `LoginRetryFailure` 通知（一天一次），
     /// 后者仍计入 `ConsecutiveFetchFailures`。
     login_retry_failure: Mutex<bool>,
+    /// 本轮是否命中"需要人工完成 reauth"（无人值守环境无法交互）。
+    /// 由 `lib.rs` 读取并清除：命中后进入等待模式（ReauthPending 通知 +
+    /// 定期重载 cookie 探测会话），而不是继续拿账号撞锁。
+    reauth_pending: Mutex<bool>,
 }
 
 impl ApiService {
@@ -54,6 +91,7 @@ impl ApiService {
             config: config.clone(),
             login_throttle: LoginThrottle::new(),
             login_retry_failure: Mutex::new(false),
+            reauth_pending: Mutex::new(false),
         };
 
         // 首次登录不受冷却限制，但要记进节流器，免得刚启动就立刻重登一次。
@@ -76,7 +114,14 @@ impl ApiService {
                     .password
                     .as_ref()
                     .ok_or_else(|| "Password required for password login".to_string())?;
-                self.client.login(username, password).await?;
+                match self.client.login(username, password).await {
+                    Ok(()) => {}
+                    Err(UestcClientError::ReauthRequired { context }) => {
+                        warn!("账号需要二次认证（reauth），进入交互流程");
+                        self.complete_reauth_interactive(*context).await?;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
             LoginType::Wechat => {
                 self.client.wechat_login().await?;
@@ -92,6 +137,103 @@ impl ApiService {
         debug!("Session initialized");
 
         Ok(())
+    }
+
+    /// 交互式完成 reauth（多因子二次认证），仅适用于终端环境。
+    ///
+    /// 流程：列出服务端渲染的可用方式 → 用户选择 →
+    /// 微信扫码（终端二维码，需手机微信）/ 动态码（发码后输入验证码）/ 密码。
+    /// 标准输入不是终端时直接报错（无人值守场景由 `relogin` 识别为
+    /// `ReauthPendingError`，进入等待人工模式）。
+    async fn complete_reauth_interactive(
+        &self,
+        mut ctx: ReauthContext,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !io::stdin().is_terminal() {
+            return Err(Box::new(ReauthPendingError));
+        }
+
+        let supported: Vec<ReauthMethod> = ctx
+            .available_methods
+            .iter()
+            .filter(|m| m.is_supported())
+            .cloned()
+            .collect();
+        if supported.is_empty() {
+            return Err(format!(
+                "账号的 reauth 方式均不受支持: {:?}",
+                ctx.available_methods
+                    .iter()
+                    .map(|m| (m.id, m.name.as_str()))
+                    .collect::<Vec<_>>()
+            )
+            .into());
+        }
+
+        let default_idx = supported.iter().position(|m| m.current).unwrap_or(0);
+        println!("\n账号需要二次认证（reauth），可用方式（服务端渲染）：");
+        for (i, m) in supported.iter().enumerate() {
+            let mark = if i == default_idx { "（默认）" } else { "" };
+            println!("  [{}] {}={}{}", i + 1, m.id, m.name, mark);
+        }
+        let choice = prompt_line(&format!(
+            "选择编号(1-{}，回车=默认 {}): ",
+            supported.len(),
+            default_idx + 1
+        ))?;
+        let idx = if choice.trim().is_empty() {
+            default_idx
+        } else {
+            let parsed = choice
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| "无效的选择编号".to_string())?;
+            parsed
+                .checked_sub(1)
+                .filter(|i| *i < supported.len())
+                .ok_or_else(|| "选择编号超出范围".to_string())?
+        };
+        let method = supported[idx].clone();
+        let trust = self.config.reauth_trust_device;
+
+        match method.kind() {
+            ReauthMethodKind::Wechat => {
+                info!("微信扫码 reauth：二维码将显示在终端，请用手机微信扫一扫");
+                self.client
+                    .submit_reauth(&ctx, &method, None, None, trust)
+                    .await?;
+            }
+            ReauthMethodKind::DynamicCode => {
+                if ctx.current_type_id() != method.id {
+                    self.client.change_reauth_type(&mut ctx, &method).await?;
+                }
+                self.client.send_reauth_code(&ctx, &method).await?;
+                let code = prompt_line("请输入收到的验证码: ")?;
+                self.client
+                    .submit_reauth(&ctx, &method, Some(&code), None, trust)
+                    .await?;
+            }
+            ReauthMethodKind::Password => {
+                let password = rpassword::prompt_password("请输入登录密码（用于 reauth 验证）: ")
+                    .map_err(|e| format!("读取密码输入失败: {e}"))?;
+                self.client
+                    .submit_reauth(&ctx, &method, None, Some(&password), trust)
+                    .await?;
+            }
+            ReauthMethodKind::Unsupported => unreachable!("已过滤不支持的方式"),
+        }
+        info!("reauth 完成，会话已就绪");
+        Ok(())
+    }
+
+    /// 等待人工 reauth 期间的探测：从磁盘重载 cookie 文件（`--reauth`
+    /// 子命令写入的新会话），再探测业务会话。恢复后调用方继续监控。
+    pub(crate) async fn probe_recovered_session(&self) -> bool {
+        if let Err(e) = self.client.reload_cookie_file() {
+            warn!("重载 cookie 文件失败: {}", e);
+            return false;
+        }
+        self.check_session().await
     }
 
     /// 受冷却保护的重新登录。冷却期内直接报错，让这一轮取数失败，
@@ -110,10 +252,34 @@ impl ApiService {
             Err(e) => {
                 // 登录成功会由 `login()` 清除标志；失败则在此置位，
                 // 供 `lib.rs` 区分本轮失败是否由登录引起。
-                self.note_login_retry_failure();
+                if e.is::<ReauthPendingError>() {
+                    self.note_reauth_pending();
+                } else {
+                    self.note_login_retry_failure();
+                }
                 Err(e)
             }
         }
+    }
+
+    fn note_reauth_pending(&self) {
+        *self
+            .reauth_pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    }
+
+    /// 读取并清除"本轮命中 reauth 等待人工"标志。
+    ///
+    /// `lib.rs` 在取数失败后调用：返回 `true` 说明需要进入等待人工模式
+    /// （`ReauthPending` 通知 + 定期重载 cookie 探测会话恢复），
+    /// 而不是继续计入 `LoginRetryFailure`。
+    pub fn take_reauth_pending(&self) -> bool {
+        let mut flag = self
+            .reauth_pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *flag)
     }
 
     fn note_login_retry_failure(&self) {

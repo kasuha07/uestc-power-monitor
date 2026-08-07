@@ -10,6 +10,8 @@
 
 - **定时监控**：按固定间隔轮询电费数据（默认 600 秒）。
 - **自动重试与会话恢复**：请求失败自动重试；检测到会话失效会自动重新登录。
+- **reauth 二次认证支持**：账号触发多因子认证时，启动（终端）交互式完成；
+  无人值守时发送通知等待人工，人工跑 `--reauth` 后 daemon 自动恢复。
 - **SQLite 持久化**：每次采样写入 `power_records`，便于后续统计分析。
 - **多事件通知**：
   - 低余额告警
@@ -135,6 +137,7 @@ docker compose up -d --build
 | `interval_seconds` | 轮询间隔（秒） | `600` |
 | `timezone` | 应用时区 | `Asia/Shanghai` |
 | `login_type` | 登录方式：`password` / `wechat` | `password` |
+| `reauth_trust_device` | reauth 可信设备弹窗：`true`=信任此设备 / `false`=仅本次（默认） | `false` |
 | `cookie_file` | 加密 Cookie 持久化文件 | `uestc_cookies.json` |
 | `cookie_encryption_key` | Cookie 落盘加密密钥；`password` 登录可默认由账号密码派生，`wechat` 登录必须显式配置 | 无 |
 | `notify.enabled` | 是否启用通知 | `false` |
@@ -144,6 +147,9 @@ docker compose up -d --build
 | `notify.login_retry_failure_enabled` | 登录重试失败通知开关（会话失效后重登连续失败时提醒） | `false` |
 | `notify.login_retry_failure_threshold` | 登录重试失败连续轮次阈值 | `3` |
 | `notify.login_retry_failure_cooldown_minutes` | 登录重试失败通知滚动冷却（分钟） | `1440` |
+| `notify.reauth_pending_enabled` | reauth 待人工通知开关（运行期触发多因子且无人值守时） | `false` |
+| `notify.reauth_pending_cooldown_minutes` | reauth 待人工重复提醒冷却（分钟） | `30` |
+| `notify.reauth_resolved_enabled` | 人工完成 reauth 会话恢复后的确认通知开关 | `false` |
 | `notify.heartbeat_enabled` | 每日心跳开关 | `false` |
 | `notify.heartbeat_hours` | 每日心跳小时（0-23，支持单值或数组，兼容 `heartbeat_hour`） | `[9]` |
 | `notify.retry_attempts` | 每个通知通道最大尝试次数 | `3` |
@@ -212,6 +218,23 @@ UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 因此 `wechat` 建议只用于本地或可交互环境；Docker / systemd 等长跑部署请使用
 `password` 登录。
 
+### reauth（多因子二次认证）与无人值守恢复
+
+UESTC 统一认证启用了多因子策略：密码登录成功后会被 302 到 reauth 页（TGT 已发但
+被锁定），必须完成第二因素才能换取服务票据。reauth 的可用方式（微信扫码 / 短信 /
+企业微信验证码等）**都需要人工参与**，且 TGT 是会话级 cookie，会话过期后重登会再次
+触发 reauth。
+
+- **启动（终端）**：触发 reauth 时自动列出可用方式，交互选择后完成
+  （微信扫码在终端打印二维码，用手机微信扫；短信/企微码输入收到的验证码）。
+- **无人值守运行期**：触发 reauth 时**不自动重试**（避免拿账号撞锁），发送
+  `ReauthPending` 通知（首次立即、之后每 30 分钟重复提醒），进入等待模式。
+- **人工恢复**：在终端运行 `uestc-power-monitor --reauth`（登录 + 交互完成 reauth
+  + 保存 cookie 后退出，不进入监控循环；会话已有效时幂等通过），daemon 会在下个
+  轮询周期检测到会话恢复，自动继续监控并发送 `ReauthResolved` 确认通知。
+- 相关配置：`reauth_trust_device`（可信设备弹窗）、`notify.reauth_pending_*`、
+  `notify.reauth_resolved_enabled`。
+
 ---
 
 ## 通知系统
@@ -223,6 +246,8 @@ UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 - **Heartbeat**：每天在一个或多个指定小时发送状态心跳
 - **LoginFailure**：启动登录失败时发送
 - **LoginRetryFailure**：运行期会话失效后重登连续失败达到阈值时发送（滚动冷却，默认一天最多一次）
+- **ReauthPending**：运行期触发 reauth（多因子）且无人值守无法交互时发送（首次立即、之后按冷却重复，默认 30 分钟）
+- **ReauthResolved**：人工完成 reauth、daemon 会话恢复后发送（一次性确认）
 - **ConsecutiveFetchFailures**：连续抓取失败达到阈值后发送
 
 ### 通知通道
@@ -305,19 +330,33 @@ cargo test
 - 检查学号/密码是否正确
 - 检查网络是否可访问 UESTC 服务
 - 若使用 `wechat` 登录，确认对应登录流程可用
+- 若报错为"需要人工完成二次认证（reauth）"：无人值守（非终端）环境无法交互完成
+  reauth，请在终端运行 `uestc-power-monitor --reauth` 完成认证后重启；
+  或配置通知渠道并在运行期等待 `ReauthPending` 通知后按上述流程恢复
 
-### 2）没有收到通知
+### 2）收到 ReauthPending 通知（无人值守）
+
+在终端（有 SSH/终端接入的机器）运行：
+
+```bash
+uestc-power-monitor --reauth
+```
+
+按提示选择 reauth 方式并完成认证（微信扫码 / 输入验证码），完成后 daemon 会在
+下个轮询周期自动恢复监控，无需重启 daemon。
+
+### 3）没有收到通知
 
 - 确认 `notify.enabled = true`
 - 确认通道参数完整（如 Telegram token/chat_id）
 - 低余额通知受阈值与冷却时间影响
 
-### 3）Webhook/ntfy URL 被拒绝
+### 4）Webhook/ntfy URL 被拒绝
 
 - 需使用公网 `https` 地址
 - 不可指向 localhost/内网地址或解析到内网 IP
 
-### 4）更换登录方式后无法读取 Cookie
+### 5）更换登录方式后无法读取 Cookie
 
 旧明文 Cookie 不再兼容，会被忽略并在下次成功登录后重写为加密格式。若更换了 `cookie_encryption_key`，也需要删除旧 Cookie 文件后重新登录。
 

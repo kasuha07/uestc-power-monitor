@@ -16,7 +16,7 @@ use tokio::time::sleep;
 
 use tracing::{debug, error, info, warn};
 
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(reauth_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = match AppConfig::new() {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -87,6 +87,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         notification_manager.is_some()
     );
 
+    // `--reauth`：只完成登录 + 交互式 reauth + 保存 cookie，然后退出。
+    // 供无人值守 daemon 会话失效后人工恢复使用（幂等：会话有效时直接通过）。
+    if reauth_only {
+        info!("reauth 模式：登录 + 完成二次认证后退出（cookie 已保存）");
+        return Ok(());
+    }
+
     let interval = Duration::from_secs(config.interval_seconds);
     debug!(
         "Monitoring interval set to {} seconds",
@@ -107,6 +114,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // main loop
+    // `reauth_waiting`：运行期命中 reauth（无人值守无法交互）后进入等待模式——
+    // 不再取数，按轮询间隔重载 cookie 文件（人工跑 `--reauth` 写入的新会话）
+    // 并探测业务会话，恢复后继续监控并发送确认通知。
+    let mut reauth_waiting = false;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -134,6 +145,27 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             _ = async {
+                if reauth_waiting {
+                    // 等待人工 reauth：只探测恢复，不取数不重登（避免拿账号撞锁）
+                    debug!("等待人工 reauth，探测会话恢复...");
+                    if api_service.probe_recovered_session().await {
+                        info!("会话已恢复（reauth 完成），继续监控");
+                        if let Some(manager) = &mut notification_manager {
+                            manager.notify_reauth_resolved().await;
+                        }
+                        reauth_waiting = false;
+                    } else {
+                        if let Some(manager) = &mut notification_manager {
+                            manager
+                                .record_reauth_pending("业务会话仍未恢复，请尽快运行 `uestc-power-monitor --reauth`")
+                                .await;
+                        }
+                        debug!("Sleeping for {:?}...", interval);
+                        sleep(interval).await;
+                    }
+                    return;
+                }
+
                 debug!("Fetching power data...");
                 match retry(|| api_service.fetch_data(), 3, Duration::from_secs(2)).await {
                     Ok(Some(data)) => {
@@ -167,14 +199,24 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err(e) => {
                         error!("Failed to fetch data: {}", e);
-                        // 区分失败原因：会话失效后重登失败走登录重试通知
-                        // （一天一次），其余网络/上游失败仍计入连续拉取失败。
+                        // 区分失败原因：reauth 需要人工 → 进入等待模式；
+                        // 会话失效后重登失败 → 登录重试通知（一天一次）；
+                        // 其余网络/上游失败仍计入连续拉取失败。
                         if let Some(manager) = &mut notification_manager {
-                            if api_service.take_login_retry_failure() {
+                            if api_service.take_reauth_pending() {
+                                warn!("需要人工完成二次认证（reauth），进入等待模式（可在终端运行 `uestc-power-monitor --reauth` 完成）");
+                                manager
+                                    .record_reauth_pending(&e.to_string())
+                                    .await;
+                                reauth_waiting = true;
+                            } else if api_service.take_login_retry_failure() {
                                 manager.record_login_retry_failure(&e.to_string()).await;
                             } else {
                                 manager.record_fetch_failure().await;
                             }
+                        } else if api_service.take_reauth_pending() {
+                            warn!("需要人工完成二次认证（reauth），进入等待模式（可在终端运行 `uestc-power-monitor --reauth` 完成）");
+                            reauth_waiting = true;
                         }
                     }
                 }

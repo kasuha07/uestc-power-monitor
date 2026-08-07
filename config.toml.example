@@ -13,6 +13,10 @@ password = "your_password"
 # 也可使用环境变量 UPM_COOKIE_ENCRYPTION_KEY 或 Docker secret /run/secrets/cookie_encryption_key。
 # cookie_encryption_key = "change-me-to-a-long-random-secret"
 
+# reauth 可信设备弹窗：true=信任此设备（服务端持久化指纹，下次同设备可能免弹窗；
+# 未实测）/ false=仅本次（默认）。环境变量：UPM_REAUTH_TRUST_DEVICE
+# reauth_trust_device = false
+
 # 监控轮询间隔（秒）
 interval_seconds = 600
 
@@ -38,6 +42,12 @@ login_failure_enabled = true  # 是否启用登录失败通知（启动时登录
 login_retry_failure_enabled = true  # 是否启用登录重试失败通知（默认 false）
 login_retry_failure_threshold = 3   # 连续失败轮次阈值（默认3轮）
 login_retry_failure_cooldown_minutes = 1440  # 滚动冷却时间（分钟，默认1440 = 一天最多一次）
+
+# reauth 待人工通知（运行期触发多因子二次认证且无人值守无法交互时：
+# 首次立即发送，之后按冷却重复提醒，直到人工运行 `uestc-power-monitor --reauth` 完成）
+reauth_pending_enabled = true        # 是否启用 reauth 待人工通知（默认 false）
+reauth_pending_cooldown_minutes = 30 # 重复提醒冷却时间（分钟，默认30）
+reauth_resolved_enabled = true       # 人工完成 reauth 会话恢复后的确认通知（默认 false）
 
 # 连续获取数据失败通知
 fetch_failure_enabled = true  # 是否启用连续获取数据失败通知

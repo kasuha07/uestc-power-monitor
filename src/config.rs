@@ -31,6 +31,9 @@ pub struct AppConfig {
     #[serde(default = "default_cookie_file")]
     pub cookie_file: String,
     pub cookie_encryption_key: Option<String>,
+    /// reauth 可信设备弹窗：true=信任此设备（服务端持久化指纹，下次同设备可能免弹窗，未实测）/ false=仅本次
+    #[serde(default)]
+    pub reauth_trust_device: bool,
     #[serde(default = "default_interval")]
     pub interval_seconds: u64,
     #[serde(default)]
@@ -228,6 +231,10 @@ fn default_login_retry_failure_cooldown_minutes() -> u64 {
     1440 // 24 hours: at most one notification per day
 }
 
+fn default_reauth_pending_cooldown_minutes() -> u64 {
+    30 // 30 minutes: frequent enough for a waiting human, sparse enough not to spam
+}
+
 fn default_notify_retry_attempts() -> u32 {
     3
 }
@@ -306,6 +313,16 @@ pub struct NotifyConfig {
     /// 滚动冷却：距上次成功发送至少这么久才允许再发。默认 1440 分钟（一天一次）。
     #[serde(default = "default_login_retry_failure_cooldown_minutes")]
     pub login_retry_failure_cooldown_minutes: u64,
+    /// 运行期 reauth（多因子二次认证）需要人工完成时的提醒通知。
+    /// 首次触发立即发送，之后按 `reauth_pending_cooldown_minutes` 滚动冷却重复提醒。
+    #[serde(default)]
+    pub reauth_pending_enabled: bool,
+    /// reauth 等待人工的重复提醒冷却（分钟）。默认 30 分钟。
+    #[serde(default = "default_reauth_pending_cooldown_minutes")]
+    pub reauth_pending_cooldown_minutes: u64,
+    /// 人工完成 reauth、daemon 会话恢复后的确认通知。
+    #[serde(default)]
+    pub reauth_resolved_enabled: bool,
     #[serde(default)]
     pub fetch_failure_enabled: bool,
     #[serde(default = "default_fetch_failure_threshold")]
@@ -390,6 +407,9 @@ impl Default for NotifyConfig {
             login_retry_failure_enabled: false,
             login_retry_failure_threshold: default_login_retry_failure_threshold(),
             login_retry_failure_cooldown_minutes: default_login_retry_failure_cooldown_minutes(),
+            reauth_pending_enabled: false,
+            reauth_pending_cooldown_minutes: default_reauth_pending_cooldown_minutes(),
+            reauth_resolved_enabled: false,
             fetch_failure_enabled: false,
             fetch_failure_threshold: default_fetch_failure_threshold(),
             fetch_failure_cooldown_minutes: default_fetch_failure_cooldown_minutes(),
@@ -580,10 +600,18 @@ impl AppConfig {
         let missing: Vec<&'static str> = match self.login_type {
             LoginType::Password => {
                 let mut missing = Vec::new();
-                if self.username.as_deref().map_or(true, |v| v.trim().is_empty()) {
+                if self
+                    .username
+                    .as_deref()
+                    .map_or(true, |v| v.trim().is_empty())
+                {
                     missing.push("username");
                 }
-                if self.password.as_deref().map_or(true, |v| v.trim().is_empty()) {
+                if self
+                    .password
+                    .as_deref()
+                    .map_or(true, |v| v.trim().is_empty())
+                {
                     missing.push("password");
                 }
                 missing
@@ -621,10 +649,10 @@ impl AppConfig {
                     self.username = Some(prompt_line("请输入用户名（学号）: ")?);
                 }
                 "password" => {
-                    self.password =
-                        Some(rpassword::prompt_password("请输入密码: ").map_err(|e| {
-                            format!("读取密码输入失败: {e}")
-                        })?);
+                    self.password = Some(
+                        rpassword::prompt_password("请输入密码: ")
+                            .map_err(|e| format!("读取密码输入失败: {e}"))?,
+                    );
                 }
                 "cookie_encryption_key" => {
                     self.cookie_encryption_key = Some(
@@ -932,6 +960,7 @@ heartbeat_hours = 8
             login_type: LoginType::Password,
             cookie_file: "cookies.json".to_string(),
             cookie_encryption_key: None,
+            reauth_trust_device: false,
             interval_seconds: 600,
             notify,
         }

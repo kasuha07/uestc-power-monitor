@@ -23,7 +23,14 @@ async fn main() {
         .with_timer(LocalTimeFormatter)
         .init();
 
-    if let Err(e) = uestc_power_monitor::run().await {
+    // `--reauth`：只完成登录 + 交互式 reauth + 保存 cookie 后退出，
+    // 供无人值守 daemon 会话失效后人工恢复使用（需在终端运行）。
+    let reauth_only = std::env::args().any(|arg| arg == "--reauth");
+    if reauth_only {
+        println!("reauth 模式：完成登录 + 二次认证后退出，不进入监控循环");
+    }
+
+    if let Err(e) = uestc_power_monitor::run(reauth_only).await {
         error!("Error: {}", e);
         std::process::exit(1);
     }

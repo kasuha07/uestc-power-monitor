@@ -30,6 +30,11 @@ pub enum NotificationEvent {
     /// 运行期会话失效后重登连续失败达到阈值时触发（区别于启动时
     /// 登录失败的 `LoginFailure`：后者进程即将退出，前者服务仍在静默重试）。
     LoginRetryFailure,
+    /// 运行期触发 reauth（多因子二次认证）且无人值守无法交互：需要人工
+    /// 完成第二因素（运行 `--reauth`），daemon 进入等待模式。
+    ReauthPending,
+    /// 人工完成 reauth、daemon 会话恢复后触发（一次性确认）。
+    ReauthResolved,
     ConsecutiveFetchFailures,
 }
 
@@ -46,6 +51,9 @@ pub struct NotificationManager {
     /// 滚动冷却：距上次成功发送至少 `login_retry_failure_cooldown_minutes`
     /// 分钟才允许再发（默认 1440，即一天最多一次）。
     last_login_retry_failure_notify_time: Option<chrono::DateTime<Tz>>,
+    /// 滚动冷却：距上次成功发送至少 `reauth_pending_cooldown_minutes`
+    /// 分钟才允许再发（默认 30 分钟——人不在终端前，提醒要勤但不能刷屏）。
+    last_reauth_pending_notify_time: Option<chrono::DateTime<Tz>>,
     startup_notified: bool,
 }
 
@@ -97,6 +105,7 @@ impl NotificationManager {
             last_fetch_failure_notify_time: None,
             consecutive_login_retry_failures: 0,
             last_login_retry_failure_notify_time: None,
+            last_reauth_pending_notify_time: None,
             startup_notified: false,
         })
     }
@@ -443,11 +452,64 @@ impl NotificationManager {
                     self.last_login_retry_failure_notify_time = Some(now);
                     debug!("Login retry failure notification sent successfully");
                 } else {
-                    warn!(
-                        "Login retry failure notification failed; cooldown will not be consumed"
-                    );
+                    warn!("Login retry failure notification failed; cooldown will not be consumed");
                 }
             }
+        }
+    }
+
+    /// 记录一次"需要人工完成 reauth"的等待轮次。首次立即发送 `ReauthPending`
+    /// 通知，之后按 `reauth_pending_cooldown_minutes` 滚动冷却重复提醒
+    /// （默认 30 分钟——人不在终端前，提醒要勤但不能刷屏），直到会话恢复。
+    pub async fn record_reauth_pending(&mut self, error_msg: &str) {
+        if !self.config.enabled || !self.config.reauth_pending_enabled {
+            return;
+        }
+
+        let now = time::now();
+        let should_notify = if let Some(last_time) = self.last_reauth_pending_notify_time {
+            let elapsed = now.signed_duration_since(last_time);
+            elapsed.num_minutes() >= self.config.reauth_pending_cooldown_minutes as i64
+        } else {
+            true
+        };
+
+        if should_notify {
+            info!("Sending reauth pending notification...");
+            let msg = format!(
+                "需要人工完成二次认证（reauth）:\n{}\n\
+                 请在终端运行 `uestc-power-monitor --reauth` 完成认证，\n\
+                 daemon 检测到会话恢复后会自动继续监控。",
+                error_msg
+            );
+            let report = self
+                .notify_error_all(&msg, NotificationEvent::ReauthPending)
+                .await;
+            if report.has_success() {
+                self.last_reauth_pending_notify_time = Some(now);
+                debug!("Reauth pending notification sent successfully");
+            } else {
+                warn!("Reauth pending notification failed; cooldown will not be consumed");
+            }
+        }
+    }
+
+    /// 人工完成 reauth、daemon 会话恢复后发送一次性确认通知。
+    pub async fn notify_reauth_resolved(&self) {
+        if !self.config.enabled || !self.config.reauth_resolved_enabled {
+            return;
+        }
+        info!("Sending reauth resolved notification...");
+        let report = self
+            .notify_error_all(
+                "会话已恢复：reauth 完成，监控继续。",
+                NotificationEvent::ReauthResolved,
+            )
+            .await;
+        if report.has_success() {
+            debug!("Reauth resolved notification sent successfully");
+        } else {
+            warn!("Reauth resolved notification failed");
         }
     }
 
@@ -794,7 +856,9 @@ impl Notifier for ConsoleNotifier {
                 }
                 NotificationEvent::LoginFailure
                 | NotificationEvent::LoginRetryFailure
-                | NotificationEvent::ConsecutiveFetchFailures => {
+                | NotificationEvent::ConsecutiveFetchFailures
+                | NotificationEvent::ReauthPending
+                | NotificationEvent::ReauthResolved => {
                     // These events use notify_error instead
                 }
             }
@@ -813,13 +877,16 @@ impl Notifier for ConsoleNotifier {
                     error!("UESTC Power Monitor 🔐 [Login Failure] {}", error_msg);
                 }
                 NotificationEvent::LoginRetryFailure => {
-                    error!(
-                        "UESTC Power Monitor 🔐 [Login Retry Failure] {}",
-                        error_msg
-                    );
+                    error!("UESTC Power Monitor 🔐 [Login Retry Failure] {}", error_msg);
                 }
                 NotificationEvent::ConsecutiveFetchFailures => {
                     error!("UESTC Power Monitor ❌ [Fetch Failures] {}", error_msg);
+                }
+                NotificationEvent::ReauthPending => {
+                    error!("UESTC Power Monitor 🔑 [Reauth Required] {}", error_msg);
+                }
+                NotificationEvent::ReauthResolved => {
+                    info!("UESTC Power Monitor ✅ [Reauth Resolved] {}", error_msg);
                 }
                 NotificationEvent::LowBalance
                 | NotificationEvent::Heartbeat
@@ -860,7 +927,9 @@ impl Notifier for WebhookNotifier {
                 NotificationEvent::Startup => "startup",
                 NotificationEvent::LoginFailure
                 | NotificationEvent::LoginRetryFailure
-                | NotificationEvent::ConsecutiveFetchFailures => {
+                | NotificationEvent::ConsecutiveFetchFailures
+                | NotificationEvent::ReauthPending
+                | NotificationEvent::ReauthResolved => {
                     return Ok(()); // These events use notify_error instead
                 }
             };
@@ -887,6 +956,8 @@ impl Notifier for WebhookNotifier {
                 NotificationEvent::LoginFailure => "login_failure",
                 NotificationEvent::LoginRetryFailure => "login_retry_failure",
                 NotificationEvent::ConsecutiveFetchFailures => "consecutive_fetch_failures",
+                NotificationEvent::ReauthPending => "reauth_pending",
+                NotificationEvent::ReauthResolved => "reauth_resolved",
                 NotificationEvent::LowBalance
                 | NotificationEvent::Heartbeat
                 | NotificationEvent::Startup => {
@@ -948,7 +1019,9 @@ impl Notifier for TelegramNotifier {
                 NotificationEvent::Startup => "🚀 [Startup]",
                 NotificationEvent::LoginFailure
                 | NotificationEvent::LoginRetryFailure
-                | NotificationEvent::ConsecutiveFetchFailures => {
+                | NotificationEvent::ConsecutiveFetchFailures
+                | NotificationEvent::ReauthPending
+                | NotificationEvent::ReauthResolved => {
                     return Ok(()); // These events use notify_error instead
                 }
             };
@@ -983,6 +1056,8 @@ impl Notifier for TelegramNotifier {
                 NotificationEvent::LoginFailure => "🔐 [Login Failure]",
                 NotificationEvent::LoginRetryFailure => "🔐 [Login Retry Failure]",
                 NotificationEvent::ConsecutiveFetchFailures => "❌ [Fetch Failures]",
+                NotificationEvent::ReauthPending => "🔑 [Reauth Required]",
+                NotificationEvent::ReauthResolved => "✅ [Reauth Resolved]",
                 NotificationEvent::LowBalance
                 | NotificationEvent::Heartbeat
                 | NotificationEvent::Startup => {
@@ -1043,8 +1118,11 @@ fn build_power_notification(
                 time::now_display()
             ),
         )),
-        NotificationEvent::LoginFailure | NotificationEvent::ConsecutiveFetchFailures => None,
-        NotificationEvent::LoginRetryFailure => None,
+        NotificationEvent::LoginFailure
+        | NotificationEvent::LoginRetryFailure
+        | NotificationEvent::ConsecutiveFetchFailures
+        | NotificationEvent::ReauthPending
+        | NotificationEvent::ReauthResolved => None,
     }
 }
 
@@ -1060,6 +1138,14 @@ fn build_error_notification(error_msg: &str, event: NotificationEvent) -> Option
         )),
         NotificationEvent::ConsecutiveFetchFailures => Some((
             "❌ UESTC Power Monitor - Fetch Failures".to_string(),
+            format!("{}\nTime: {}", error_msg, time::now_display()),
+        )),
+        NotificationEvent::ReauthPending => Some((
+            "🔑 UESTC Power Monitor - Reauth Required".to_string(),
+            format!("{}\nTime: {}", error_msg, time::now_display()),
+        )),
+        NotificationEvent::ReauthResolved => Some((
+            "✅ UESTC Power Monitor - Reauth Resolved".to_string(),
             format!("{}\nTime: {}", error_msg, time::now_display()),
         )),
         NotificationEvent::LowBalance
@@ -1532,7 +1618,9 @@ impl Notifier for EmailNotifier {
                 }
                 NotificationEvent::LoginFailure
                 | NotificationEvent::LoginRetryFailure
-                | NotificationEvent::ConsecutiveFetchFailures => {
+                | NotificationEvent::ConsecutiveFetchFailures
+                | NotificationEvent::ReauthPending
+                | NotificationEvent::ReauthResolved => {
                     return Ok(()); // These events use notify_error instead
                 }
             };
@@ -1579,6 +1667,38 @@ impl Notifier for EmailNotifier {
                         - Incorrect credentials (password changed)\n\
                         - Account locked or suspended\n\
                         - Network connectivity issues\n\
+                        \n\
+                        Time: {}",
+                        error_msg,
+                        time::now_display()
+                    );
+                    (subject, body)
+                }
+                NotificationEvent::ReauthPending => {
+                    let subject = "🔑 UESTC Power Monitor - Reauth Required";
+                    let body = format!(
+                        "UESTC Power Monitor - Reauth Required\n\
+                        \n\
+                        {}\n\
+                        \n\
+                        Please run `uestc-power-monitor --reauth` in a terminal\n\
+                        to complete the second-factor authentication.\n\
+                        The daemon will resume monitoring automatically.\n\
+                        \n\
+                        Time: {}",
+                        error_msg,
+                        time::now_display()
+                    );
+                    (subject, body)
+                }
+                NotificationEvent::ReauthResolved => {
+                    let subject = "✅ UESTC Power Monitor - Reauth Resolved";
+                    let body = format!(
+                        "UESTC Power Monitor - Reauth Resolved\n\
+                        \n\
+                        {}\n\
+                        \n\
+                        Monitoring has resumed.\n\
                         \n\
                         Time: {}",
                         error_msg,
@@ -1700,6 +1820,7 @@ mod tests {
             last_fetch_failure_notify_time: None,
             consecutive_login_retry_failures: 0,
             last_login_retry_failure_notify_time: None,
+            last_reauth_pending_notify_time: None,
             startup_notified: false,
         }
     }
@@ -1802,6 +1923,47 @@ mod tests {
             "cooldown must suppress repeat notifications within a day"
         );
         assert_eq!(manager.consecutive_login_retry_failures, 4);
+    }
+
+    #[tokio::test]
+    async fn reauth_pending_notifies_immediately_and_respects_cooldown() {
+        let mut config = base_notify_config();
+        config.reauth_pending_enabled = true;
+        config.reauth_pending_cooldown_minutes = 30;
+        let mut manager = manager_with_notifier(config, true);
+
+        manager.record_reauth_pending("need reauth").await;
+        let first = manager.last_reauth_pending_notify_time;
+        assert!(first.is_some(), "first detection must notify immediately");
+
+        // 冷却期内重复探测不再发送。
+        manager.record_reauth_pending("need reauth").await;
+        assert_eq!(
+            manager.last_reauth_pending_notify_time, first,
+            "cooldown must suppress repeat notifications"
+        );
+    }
+
+    #[tokio::test]
+    async fn reauth_pending_disabled_never_notifies() {
+        let mut config = base_notify_config();
+        config.reauth_pending_enabled = false;
+        let mut manager = manager_with_notifier(config, true);
+
+        manager.record_reauth_pending("need reauth").await;
+        assert!(
+            manager.last_reauth_pending_notify_time.is_none(),
+            "disabled reauth_pending must not notify"
+        );
+    }
+
+    #[tokio::test]
+    async fn reauth_resolved_notifies_once_when_enabled() {
+        let mut config = base_notify_config();
+        config.reauth_resolved_enabled = true;
+        let manager = manager_with_notifier(config, true);
+        manager.notify_reauth_resolved().await;
+        // 无冷却状态：重复发送是允许的（恢复事件本就极少），此处只验证不 panic 且成功路径已覆盖。
     }
 
     #[tokio::test]
