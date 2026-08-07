@@ -85,6 +85,17 @@ impl WechatAuthParams {
         )
     }
 
+    /// 与 `build_qr_xml_url` 等价但返回 HTML 页面（reauth 链路 XML 取 uuid 失败时的回退）。
+    pub fn build_qr_html_url(&self) -> String {
+        format!(
+            "{}/connect/qrconnect?appid={}&redirect_uri={}&state={}&response_type=code&scope=snsapi_login&stylelite=1&fast_login=1",
+            WECHAT_OPEN_URL,
+            urlencoding::encode(&self.appid),
+            urlencoding::encode(&self.redirect_uri),
+            urlencoding::encode(&self.state)
+        )
+    }
+
     pub fn build_callback_url(&self, wx_code: &str) -> String {
         let separator = if self.redirect_uri.contains('?') {
             "&"
@@ -165,6 +176,22 @@ pub fn parse_qr_uuid_from_xml(xml_text: &str) -> Result<String> {
             source: None,
         }
     })
+}
+
+/// 从 qrconnect HTML 页面提取二维码 uuid（镜像分析仓库正则
+/// `/connect\/qrcode\/([0-9A-Za-z_-]{8,})/`；XML 路径失败时的回退）。
+pub fn parse_qr_uuid_from_html(html: &str) -> Result<String> {
+    let re = Regex::new(r"/connect/qrcode/([0-9A-Za-z_-]{8,})").map_err(|e| {
+        UestcClientError::WeChatError {
+            message: format!("Regex compilation error: {}", e),
+        }
+    })?;
+    re.captures(html)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+        .ok_or_else(|| UestcClientError::WeChatError {
+            message: "qrconnect 页未提取到 uuid（页面结构可能已变）".to_string(),
+        })
 }
 
 /// Display QR code in terminal for WeChat login
@@ -452,7 +479,9 @@ mod tests {
     fn a_known_status_resets_the_unknown_counter() {
         let mut guard = ScanPollGuard::new();
         for _ in 0..MAX_CONSECUTIVE_UNKNOWN_STATUS - 1 {
-            guard.record_status(&ScanStatus::Unknown(999)).expect("below limit");
+            guard
+                .record_status(&ScanStatus::Unknown(999))
+                .expect("below limit");
         }
 
         guard

@@ -73,10 +73,7 @@ pub fn load_encrypted_cookie_store(
             Some(cookies) => {
                 // 旧版（未加密）cookie 文件：解析成功后立即迁移为加密格式。
                 let store = Arc::new(CookieStoreMutex::new(store_from_cookies(cookies)));
-                log::info!(
-                    "检测到旧版明文 cookie 文件，自动迁移为加密存储: {:?}",
-                    path
-                );
+                log::info!("检测到旧版明文 cookie 文件，自动迁移为加密存储: {:?}", path);
                 if let Err(e) = save_encrypted_cookie_store(path, &store, encryption_secret) {
                     // 写回失败时保留原明文文件，待下次启动重试；内存中的 cookie 仍可使用。
                     log::warn!(
@@ -542,8 +539,8 @@ mod tests {
         }
 
         // 迁移后的加密文件可再次正常加载（round-trip）。
-        let reloaded = load_encrypted_cookie_store(&path, b"test-secret")
-            .expect("reload migrated file");
+        let reloaded =
+            load_encrypted_cookie_store(&path, b"test-secret").expect("reload migrated file");
         assert!(
             reloaded
                 .lock()

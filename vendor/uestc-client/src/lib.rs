@@ -7,6 +7,8 @@ pub use client::UestcClient;
 #[cfg(feature = "blocking")]
 pub use client::UestcBlockingClient;
 
+pub use core::reauth::{ReauthContext, ReauthMethod, ReauthMethodKind};
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -45,6 +47,23 @@ pub enum UestcClientError {
         message: String,
         username: Option<String>,
     },
+
+    /// 密码校验通过（TGT 已发）但被多因子策略锁定，需要完成 reauth 第二因素。
+    ///
+    /// 调用方拿到 `context` 后按需编排：
+    /// `change_reauth_type` → `send_reauth_code` → `submit_reauth`。
+    #[error(
+        "Multi-factor authentication (reauth) required; complete it via change_reauth_type/send_reauth_code/submit_reauth"
+    )]
+    ReauthRequired {
+        /// reauth 会话上下文（可用方式列表 + 服务端渲染参数）。
+        /// 装箱以控制错误变体体积（`result_large_err`）。
+        context: Box<ReauthContext>,
+    },
+
+    /// reauth 提交/切换/发码被服务端拒绝。
+    #[error("Reauth failed: {message}")]
+    ReauthFailed { message: String },
 
     #[error("Logout failed: {message}")]
     LogoutFailed { message: String },

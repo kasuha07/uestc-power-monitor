@@ -1,4 +1,5 @@
 use crate::{Result, UestcClientError};
+use regex::Regex;
 use scraper::{Html, Selector};
 use std::collections::HashMap;
 
@@ -80,6 +81,28 @@ pub fn parse_login_page(html: &str) -> Result<LoginPageInfo> {
         pwd_encrypt_salt,
         form_data,
     })
+}
+
+/// 从 HTML 中提取 CAS `execution` 令牌（表单隐藏域优先，其次裸 JSON 键）。
+///
+/// reauth 完成后 `/login` 停在渲染页时，需要近空表单 POST 携带 execution
+/// 换取 ST（wire 实测 2026-08-06）。
+pub fn extract_execution(html: &str) -> Option<String> {
+    // <input type="hidden" name="execution" value="e1s1" /> 及变体
+    let named_re = Regex::new(r#"name=["']execution["'][^>]*value=["']([^"']*)["']"#).ok()?;
+    if let Some(caps) = named_re.captures(html) {
+        let v = caps[1].trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    // 裸 JSON 键：execution: "e1s1" 或 execution = 'e1s1'
+    let bare_re = Regex::new(r#"execution["']?\s*[:=]\s*["']([^"']+)["']"#).ok()?;
+    bare_re
+        .captures(html)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Extract error message from login response HTML
