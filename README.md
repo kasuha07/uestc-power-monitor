@@ -137,7 +137,7 @@ docker compose up -d --build
 | `interval_seconds` | 轮询间隔（秒） | `600` |
 | `timezone` | 应用时区 | `Asia/Shanghai` |
 | `login_type` | 登录方式：`password` / `wechat` | `password` |
-| `reauth_trust_device` | reauth 可信设备弹窗：`true`=信任此设备 / `false`=仅本次（默认） | `false` |
+| `reauth_trust_device` | reauth 交互提问"是否记住该设备"的回车默认值：`true`=默认记住 / `false`=默认仅本次；非终端（无人值守）不生效 | `false` |
 | `cookie_file` | 加密 Cookie 持久化文件 | `uestc_cookies.json` |
 | `cookie_encryption_key` | Cookie 落盘加密密钥；`password` 登录可默认由账号密码派生，`wechat` 登录必须显式配置 | 无 |
 | `notify.enabled` | 是否启用通知 | `false` |
@@ -227,6 +227,8 @@ UESTC 统一认证启用了多因子策略：密码登录成功后会被 302 到
 
 - **启动（终端）**：触发 reauth 时自动列出可用方式，交互选择后完成
   （微信扫码在终端打印二维码，用手机微信扫；短信/企微码输入收到的验证码）。
+  提交前会**提问是否记住该设备**（可信设备弹窗）：回车采用配置
+  `reauth_trust_device` 的默认值，输入 `y` 则信任此设备（下次同设备可能免二次认证）。
 - **无人值守运行期**：触发 reauth 时**不自动重试**（避免拿账号撞锁），发送
   `ReauthPending` 通知（首次立即、之后每 30 分钟重复提醒），进入等待模式。
 - **人工恢复**：在终端运行 `uestc-power-monitor --reauth`（登录 + 交互完成 reauth
@@ -342,8 +344,8 @@ cargo test
 uestc-power-monitor --reauth
 ```
 
-按提示选择 reauth 方式并完成认证（微信扫码 / 输入验证码），完成后 daemon 会在
-下个轮询周期自动恢复监控，无需重启 daemon。
+按提示选择 reauth 方式并完成认证（微信扫码 / 输入验证码；提交前可回答"是否记住
+该设备"），完成后 daemon 会在下个轮询周期自动恢复监控，无需重启 daemon。
 
 ### 3）没有收到通知
 

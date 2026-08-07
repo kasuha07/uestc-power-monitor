@@ -31,7 +31,8 @@ pub struct AppConfig {
     #[serde(default = "default_cookie_file")]
     pub cookie_file: String,
     pub cookie_encryption_key: Option<String>,
-    /// reauth 可信设备弹窗：true=信任此设备（服务端持久化指纹，下次同设备可能免弹窗，未实测）/ false=仅本次
+    /// reauth 可信设备弹窗：true=信任此设备（服务端持久化指纹，下次同设备可能免弹窗，未实测）/ false=仅本次。
+    /// 仅作终端交互提问"是否记住该设备"的默认值；非终端（无人值守）场景不提交 reauth，不生效。
     #[serde(default)]
     pub reauth_trust_device: bool,
     #[serde(default = "default_interval")]

@@ -148,10 +148,14 @@ impl ApiService {
 
     /// 交互式完成 reauth（多因子二次认证），仅适用于终端环境。
     ///
-    /// 流程：列出服务端渲染的可用方式 → 用户选择 →
+    /// 流程：列出服务端渲染的可用方式 → 用户选择 → 确认是否记住该设备 →
     /// 微信扫码（终端二维码，需手机微信）/ 动态码（发码后输入验证码）/ 密码。
     /// 标准输入不是终端时直接报错（无人值守场景由 `relogin` 识别为
     /// `ReauthPendingError`，进入等待人工模式）。
+    ///
+    /// "是否记住该设备"（`skipTmpReAuth` 可信设备弹窗）以交互提问为准，
+    /// 配置 `reauth_trust_device` 只作为回车默认值；非终端（无人值守）不进入
+    /// 本流程，由配置决定（但当前实现是直接报错等待人工，不提交 reauth）。
     async fn complete_reauth_interactive(
         &self,
         mut ctx: ReauthContext,
@@ -201,7 +205,7 @@ impl ApiService {
                 .ok_or_else(|| "选择编号超出范围".to_string())?
         };
         let method = supported[idx].clone();
-        let trust = self.config.reauth_trust_device;
+        let trust = self.prompt_trust_device();
 
         match method.kind() {
             ReauthMethodKind::Wechat => {
@@ -231,6 +235,31 @@ impl ApiService {
         }
         info!("reauth 完成，会话已就绪");
         Ok(())
+    }
+
+    /// 提问"是否记住该设备"（可信设备弹窗，`skipTmpReAuth`）。
+    ///
+    /// 默认值取配置 `reauth_trust_device`：true 时回车=记住，false 时回车=仅本次。
+    /// 非 y/yes 一律视为不记住（与 `[y/N]` 惯例一致，避免误触）。
+    fn prompt_trust_device(&self) -> bool {
+        let default = self.config.reauth_trust_device;
+        let prompt = if default {
+            "是否记住该设备（信任此设备，下次免二次认证）？[Y/n]（默认记住）: "
+        } else {
+            "是否记住该设备（信任此设备，下次免二次认证）？[y/N]（默认仅本次）: "
+        };
+        match prompt_line(prompt) {
+            Ok(answer) => match answer.trim().to_ascii_lowercase().as_str() {
+                "" => default,
+                "y" | "yes" => true,
+                _ => false,
+            },
+            // 读取失败（如 stdin 异常）：退回配置默认值，不让一次提问失败卡死认证。
+            Err(e) => {
+                warn!("读取信任设备输入失败，按配置默认值处理: {}", e);
+                default
+            }
+        }
     }
 
     /// 等待人工 reauth 期间的探测：从磁盘重载 cookie 文件（`--reauth`
