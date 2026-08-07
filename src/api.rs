@@ -171,10 +171,10 @@ impl ApiService {
         }
 
         let default_idx = supported.iter().position(|m| m.current).unwrap_or(0);
-        println!("\n账号需要二次认证（reauth），可用方式（服务端渲染）：");
+        println!("\n账号需要二次认证，可用方式：");
         for (i, m) in supported.iter().enumerate() {
             let mark = if i == default_idx { "（默认）" } else { "" };
-            println!("  [{}] {}={}{}", i + 1, m.id, m.name, mark);
+            println!("  [{}] {}{}", i + 1, m.name, mark);
         }
         let choice = prompt_line(&format!(
             "选择编号(1-{}，回车=默认 {}): ",
