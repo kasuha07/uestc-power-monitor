@@ -662,7 +662,7 @@ impl AppConfig {
 
         if !crate::utils::stdin_is_interactive() {
             let docker_hint = if Path::new("/.dockerenv").exists() {
-                "\n如需交互输入，请在终端前台运行容器（如 `docker compose run --rm app`）"
+                "\n如需交互式登录（生成 Cookie 后即可无人值守运行），请在宿主机终端执行:\n  `docker compose run --rm app /usr/local/bin/uestc-power-monitor login --force`"
             } else {
                 "\n如需交互输入，请在真实终端前台运行程序"
             };

@@ -114,18 +114,25 @@ docker compose up -d --build
 
 > **容器内交互式输入凭据？** compose 创建的容器默认没有 TTY，`docker start -ai`
 > 也无法事后补分配（TTY 是容器创建时决定的属性），此时程序会报
-> “标准输入不是终端”而非挂起。如需在容器内交互输入，请用前台方式运行：
+> “标准输入不是终端”而非挂起。推荐在宿主机终端用**交互登录**生成 Cookie，
+> 之后即可无人值守运行：
 >
 > ```bash
-> # 方式一：临时容器，交互完成后即退出（推荐）
-> docker compose run --rm app
+> # 方式一：临时容器，交互登录（输入账号密码、必要时完成二次认证）后退出（推荐）
+> # 注意：`login --force` 前必须跟二进制完整路径（compose run 的参数会覆盖镜像 CMD）
+> docker compose run --rm app /usr/local/bin/uestc-power-monitor login --force
+> # 登录成功后 Cookie 保存在 data/ 卷，正常后台启动即可：
+> docker compose up -d
+>
 > # 方式二：compose 文件里为 app 服务加 `tty: true` + `stdin_open: true`
-> # 后重建容器，再 `docker start -ai uestc-power-monitor`
+> # 后重建容器，再 `docker start -ai uestc-power-monitor` 交互输入账号密码
 > ```
 >
 > 注意：即便容器带 TTY，**后台启动（如 `docker compose up -d`）时程序仍会
 > 拒绝交互输入**——无人连接的 TTY 上提示行不可见（`docker logs` 也看不到），
 > 程序会直接报错退出，请改用环境变量 / Docker Secrets / 配置文件提供凭据。
+> 若未配置凭据就后台启动，容器会在 `restart: unless-stopped` 下反复重启
+> 并刷屏报“凭据缺失”，此时按方式一登录一次即可恢复。
 
 ---
 
