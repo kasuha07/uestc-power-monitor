@@ -3,7 +3,7 @@ use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -165,7 +165,7 @@ impl ApiService {
         &self,
         mut ctx: ReauthContext,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if !io::stdin().is_terminal() {
+        if !crate::utils::stdin_is_interactive() {
             return Err(Box::new(ReauthPendingError));
         }
 

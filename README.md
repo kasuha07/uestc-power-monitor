@@ -76,8 +76,9 @@ cp config.toml.example config.toml
 
 > **不想把账号密码写进配置文件？** 可以不配置 `username`/`password`，
 > 启动时程序会交互式提示输入（密码隐藏回显，不落盘）。
-> 注意：交互输入要求标准输入为终端（直接 `cargo run` 即可）；
-> 在 systemd、CI 或 Docker 等非终端环境请改用环境变量或 Docker Secrets。
+> 注意：交互输入要求标准输入为真实终端；在 systemd、CI、后台运行的 Docker
+> 容器等非终端/无人连接环境，程序会直接报错而不是挂起等待输入，请改用环境变量、
+> Docker Secrets 或配置文件提供凭据。
 
 ### 3）运行
 
@@ -110,6 +111,21 @@ docker compose up -d --build
 
 - `./config.toml -> /app/config.toml`
 - `./data -> /app/data`
+
+> **容器内交互式输入凭据？** compose 创建的容器默认没有 TTY，`docker start -ai`
+> 也无法事后补分配（TTY 是容器创建时决定的属性），此时程序会报
+> “标准输入不是终端”而非挂起。如需在容器内交互输入，请用前台方式运行：
+>
+> ```bash
+> # 方式一：临时容器，交互完成后即退出（推荐）
+> docker compose run --rm app
+> # 方式二：compose 文件里为 app 服务加 `tty: true` + `stdin_open: true`
+> # 后重建容器，再 `docker start -ai uestc-power-monitor`
+> ```
+>
+> 注意：即便容器带 TTY，**后台启动（如 `docker compose up -d`）时程序仍会
+> 拒绝交互输入**——无人连接的 TTY 上提示行不可见（`docker logs` 也看不到），
+> 程序会直接报错退出，请改用环境变量 / Docker Secrets / 配置文件提供凭据。
 
 ---
 

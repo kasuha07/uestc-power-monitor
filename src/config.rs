@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde::de::{self, SeqAccess, Unexpected, Visitor};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::{fs, path::Path};
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Default)]
@@ -660,12 +660,17 @@ impl AppConfig {
             return Ok(());
         }
 
-        if !io::stdin().is_terminal() {
+        if !crate::utils::stdin_is_interactive() {
+            let docker_hint = if Path::new("/.dockerenv").exists() {
+                "\n如需交互输入，请在终端前台运行容器（如 `docker compose run --rm app`）"
+            } else {
+                "\n如需交互输入，请在真实终端前台运行程序"
+            };
             return Err(format!(
-                "{} 未配置，且标准输入不是终端，无法交互式输入。\n\
+                "{} 未配置，且标准输入不是终端（或无人连接），无法交互式输入。\n\
                  请改用环境变量（如 UPM_USERNAME / UPM_PASSWORD）、\n\
                  Docker Secrets（/run/secrets/username、/run/secrets/password）\n\
-                 或配置文件提供凭据。",
+                 或配置文件提供凭据。{docker_hint}。",
                 missing.join("、")
             ));
         }

@@ -8,6 +8,12 @@ services:
     container_name: uestc-power-monitor
     restart: unless-stopped
 
+    # 如需在容器内交互式输入凭据（启动时提示输入用户名/密码），可取消下面两行注释：
+    # 注意：仅前台运行（docker compose run --rm app / docker start -ai）时交互才可见；
+    # 后台启动时程序会检测到无人连接并直接报错退出（提示行在无人 TTY 上不可见）。
+    # tty: true
+    # stdin_open: true
+
     volumes:
       # 本地配置文件（建议先 cp config.toml.example config.toml）
       - ./config.toml:/app/config.toml:ro
