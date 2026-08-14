@@ -377,49 +377,15 @@ impl ApiService {
         }
     }
 
-    fn power_data_request(&self, url: &str) -> reqwest::RequestBuilder {
-        self.client
-            .get(url)
-            .header("Referer", "https://online.uestc.edu.cn/page/")
-            .header("Accept", "application/json, text/plain, */*")
-    }
-
     /// 发一次请求并解析响应体。
     ///
     /// 关键点是先把响应体读出来再解析，而不是直接用 `resp.json()`：后者失败时
     /// 只会给出 "error decoding response body"，上游到底返回了什么全部丢失。
+    ///
+    /// 走 `fetch_power_response_with_gateway_retry`：门户接口返回业务失败且
+    /// 服务端下发了直连查询地址时，跟随它再取一次。
     async fn fetch_power_response(&self, url: &str) -> Result<PowerResponse, FetchError> {
-        let mut resp = self
-            .power_data_request(url)
-            .send()
-            .await
-            .map_err(FetchError::transport)?;
-
-        let status = resp.status();
-        let content_type = resp
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
-
-        // 读取响应体本身也可能失败（连接中断、超时），那属于传输问题。
-        let body = match read_body_capped(&mut resp, MAX_BODY_BYTES)
-            .await
-            .map_err(FetchError::transport)?
-        {
-            CappedBody::Complete(body) => body,
-            CappedBody::TooLarge { read } => {
-                return Err(FetchError::TooLarge {
-                    status,
-                    content_type,
-                    read,
-                });
-            }
-        };
-
-        let text = String::from_utf8_lossy(&body);
-        classify_body(status, &content_type, body.len(), &text)
+        fetch_power_response_with_gateway_retry(&self.client, url).await
     }
 
     pub async fn fetch_data(&self) -> Result<Option<PowerInfo>, Box<dyn std::error::Error>> {
@@ -497,6 +463,89 @@ impl ApiService {
         }
 
         Ok(resp.body.data)
+    }
+}
+
+/// 携带与门户页面一致的请求头发起电费数据请求（Referer/Accept 按浏览器 XHR 形态）。
+fn power_data_request(client: &UestcClient, url: &str) -> reqwest::RequestBuilder {
+    client
+        .get(url)
+        .header("Referer", "https://online.uestc.edu.cn/page/")
+        .header("Accept", "application/json, text/plain, */*")
+}
+
+/// 发一次请求并解析响应体（不含"跟随直连地址"逻辑，供上层组合）。
+///
+/// 关键点是先把响应体读出来再解析，而不是直接用 `resp.json()`：后者失败时
+/// 只会给出 "error decoding response body"，上游到底返回了什么全部丢失。
+async fn fetch_power_response(
+    client: &UestcClient,
+    url: &str,
+) -> Result<PowerResponse, FetchError> {
+    let mut resp = power_data_request(client, url)
+        .send()
+        .await
+        .map_err(FetchError::transport)?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    // 读取响应体本身也可能失败（连接中断、超时），那属于传输问题。
+    let body = match read_body_capped(&mut resp, MAX_BODY_BYTES)
+        .await
+        .map_err(FetchError::transport)?
+    {
+        CappedBody::Complete(body) => body,
+        CappedBody::TooLarge { read } => {
+            return Err(FetchError::TooLarge {
+                status,
+                content_type,
+                read,
+            });
+        }
+    };
+
+    let text = String::from_utf8_lossy(&body);
+    classify_body(status, &content_type, body.len(), &text)
+}
+
+/// 取电数据：先走门户接口；若门户返回业务失败且服务端在载荷里下发了直连
+/// 查询地址（sign/data 已由服务端生成、随 url 下发），则跟随该地址再取一次。
+///
+/// 只跟随一层：重试地址的响应若仍是业务失败，直接交给上层——`utils::retry`
+/// 会重新发起整个请求，下一轮门户可能直接返回数据，也可能再给一个新地址。
+/// 跟随前只按"主机[:端口]/路径"记录日志，query 里的 sign/data 是签名材料，
+/// 绝不进日志（`describe_retry_url` 保证）。
+async fn fetch_power_response_with_gateway_retry(
+    client: &UestcClient,
+    url: &str,
+) -> Result<PowerResponse, FetchError> {
+    match fetch_power_response(client, url).await {
+        Ok(resp) => Ok(resp),
+        Err(FetchError::Business {
+            retry_url: Some(retry),
+            ..
+        }) => {
+            warn!(
+                "Electricity gateway asked for a direct query; following its retry endpoint ({})",
+                describe_retry_url(&retry)
+            );
+            match fetch_power_response(client, &retry).await {
+                Ok(resp) => Ok(resp),
+                // 跟随失败与门户会话无关（内网网关独立于门户），必须标记出来：
+                // 否则按普通传输错误处理会误判为会话失效，白跑会话探测甚至
+                // 触发不必要的重新登录。
+                Err(err) => Err(FetchError::FollowFailed {
+                    source: Box::new(err),
+                }),
+            }
+        }
+        Err(err) => Err(err),
     }
 }
 
@@ -681,11 +730,13 @@ fn classify_body(
                 }),
             }
         }
-        // 字符串 → 上游业务失败（见 `describe_business_payload`）。
+        // 字符串 → 上游业务失败（见 `describe_business_payload`）。若载荷里
+        // 带服务端下发的直连查询地址，一并带出去供跟随重试。
         Some(serde_json::Value::String(payload)) => Err(FetchError::Business {
             status,
             message,
-            payload: describe_business_payload(&payload),
+            payload: describe_business_payload(payload),
+            retry_url: extract_retry_url(payload),
         }),
         // 其它类型（数字/数组/bool）→ 结构不符。
         Some(other) => Err(FetchError::Shape {
@@ -719,20 +770,38 @@ enum FetchError {
     /// 信封正常（e/m 可解析），但业务层明确返回了失败：`d` 是字符串而非
     /// 数据对象。UESTC 电费网关业务失败时返回 `"d":"失败{...}"` —— "失败"
     /// 前缀后跟着一段携带诊断信息的 JSON（房间号、防重放时间戳、内网直连
-    /// 重试地址、res_hash）。不是会话问题（信封 `e=0`），重登无济于事；
-    /// 缺失的读数照常计入连续抓取失败，恢复依赖下一轮轮询。
+    /// 重试地址、res_hash）。不是会话问题（信封 `e=0`），重登无济于事。
+    ///
+    /// 该载荷里的 `url` 是服务端**已经生成好签名参数**（query 里的 sign/data）
+    /// 的直连查询地址：客户端只需要原样跟随，不需要也无法自行生成参数
+    /// （签名密钥在服务端，白盒表每次加载随机化，见逆向分析
+    /// firefox-reversed/uestc-online）。`fetch_power_response_with_gateway_retry`
+    /// 会跟随它再取一次；取不到时缺失的读数照常计入连续抓取失败。
     Business {
         status: StatusCode,
         /// 信封的 `m`（业务消息，反序列化时已清理控制字符）。
         message: String,
         /// `d` 字符串的脱敏诊断摘要（房间号/重试地址等，不含密文与签名材料）。
         payload: String,
+        /// 服务端下发的直连查询地址（含一次性 sign/data，**绝不进日志**）。
+        /// `None` = 载荷里没有可用的 `url`，无法跟随。
+        retry_url: Option<String>,
     },
     /// 响应体超过 `MAX_BODY_BYTES`，已放弃读取。
     TooLarge {
         status: StatusCode,
         content_type: String,
         read: usize,
+    },
+    /// 跟随服务端下发的直连查询地址（内网电费网关）失败。
+    ///
+    /// 直连地址是独立于门户的服务：连接失败/超时/返回形态异常说明的是内网
+    /// 网关的连通性或响应形态，与门户会话无关。若不标记出来，`session_may_be_stale`
+    /// 会把它当成会话失效，白跑会话探测；更糟的是网关长期不可达（如监控部署在
+    /// 校外）时会反复触发不必要的重新登录，误报登录重试失败。
+    FollowFailed {
+        /// 跟随失败时的原始错误（已按既有规则脱敏）。
+        source: Box<FetchError>,
     },
 }
 
@@ -776,6 +845,8 @@ impl FetchError {
             // `Business` 是明确的业务失败语义，但 HTTP 401/403 配业务失败时
             // 状态码本身就是鉴权信号，与 `Shape` 同规则处理。
             FetchError::Business { status, .. } => session_expired_status(*status),
+            // 跟随直连地址失败说明的是内网网关连通性/形态，与门户会话无关。
+            FetchError::FollowFailed { .. } => false,
         }
     }
 }
@@ -811,6 +882,7 @@ impl fmt::Display for FetchError {
                 status,
                 message,
                 payload,
+                ..
             } => write!(
                 f,
                 "electricity service reported a business failure (HTTP {}, m=\"{}\"): d is a string ({})",
@@ -830,6 +902,11 @@ impl fmt::Display for FetchError {
                 truncate_for_log(content_type, MAX_LOGGED_FIELD),
                 read
             ),
+            FetchError::FollowFailed { source } => write!(
+                f,
+                "direct query via the gateway-provided retry endpoint failed: {}",
+                source
+            ),
         }
     }
 }
@@ -838,6 +915,7 @@ impl std::error::Error for FetchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             FetchError::Transport { source, .. } => Some(source),
+            FetchError::FollowFailed { source } => Some(&**source),
             _ => None,
         }
     }
@@ -1068,6 +1146,37 @@ fn describe_business_payload(raw: &str) -> String {
     } else {
         parts.join(", ")
     }
+}
+
+/// 从 `"失败{...}"` 载荷里提取服务端下发的直连查询地址。
+///
+/// 电费网关要求直连内网查询时，在业务失败的 `d` 字符串里带上
+/// `{"url":"http://222.197.164.98:7000/zxapi/services/query/findeletric?sign=...&data=..."}`。
+/// query 里的 sign/data 是服务端用其持有的密钥生成的一次性签名材料，客户端
+/// 只负责原样跟随（参数生成机制见逆向分析 firefox-reversed/uestc-online：
+/// 白盒 AES 每次加载随机化，客户端无法自行生成可被校验的签名）。
+/// 非 http(s) 地址一律视为无效（防御性：url 是上游可控输入）。
+fn extract_retry_url(raw: &str) -> Option<String> {
+    let inner = raw.strip_prefix("失败").unwrap_or(raw);
+    let value: serde_json::Value = serde_json::from_str(inner).ok()?;
+    let url = value.get("url")?.as_str()?;
+    match url.split_once("://") {
+        Some((scheme, _)) if scheme == "http" || scheme == "https" => Some(url.to_string()),
+        _ => None,
+    }
+}
+
+/// 重试地址的日志表示：只留 `scheme://主机[:端口]/路径`。
+///
+/// query 里的 sign/data 是一次性签名材料，即使进了日志也绝不能落盘；这里
+/// 在记录前就剥离，比依赖调用方自觉可靠。控制字符同样清理（URL 是上游
+/// 可控字符串，不能让它伪造日志行）。
+fn describe_retry_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<invalid retry url>".to_string();
+    };
+    let authority_and_path = rest.split(['?', '#']).next().unwrap_or("");
+    sanitize_control_chars(&format!("{scheme}://{authority_and_path}"))
 }
 
 /// 房间信息字段缺失时的占位值，避免因为附属字段缺失丢掉一次有效读数。
@@ -1458,6 +1567,18 @@ mod tests {
         .expect_err("business failure must fail");
 
         assert!(matches!(err, FetchError::Business { .. }), "got: {:?}", err);
+        // 服务端下发的直连查询地址要原样带出去供跟随重试（含 query 里的 sign/data）。
+        let FetchError::Business { retry_url, .. } = &err else {
+            unreachable!("matched above");
+        };
+        let retry = retry_url
+            .as_deref()
+            .expect("the payload carries a direct query url");
+        assert!(
+            retry.starts_with("http://222.197.164.98:7000/zxapi/services/query/findeletric?"),
+            "got: {}",
+            retry
+        );
         let rendered = err.to_string();
         assert!(rendered.contains("business failure"), "got: {}", rendered);
         assert!(
@@ -1473,9 +1594,38 @@ mod tests {
         assert!(rendered.contains("res_hash=null"), "got: {}", rendered);
         // 信封 e=0：不是会话问题，重新登录无济于事。
         assert!(!err.session_may_be_stale());
-        // 密文与签名材料不进日志。
+        // 密文与签名材料不进日志；重试地址的路径与 query 同样不能出现。
         assert!(!rendered.contains("<ciphertext>"), "leaked: {}", rendered);
         assert!(!rendered.contains("<signature>"), "leaked: {}", rendered);
+        assert!(!rendered.contains("zxapi"), "leaked: {}", rendered);
+        assert!(!rendered.contains("findeletric"), "leaked: {}", rendered);
+        assert!(!rendered.contains("sign="), "leaked: {}", rendered);
+    }
+
+    #[test]
+    fn extract_retry_url_rejects_payloads_without_a_direct_query_url() {
+        // 没有 "失败{json}" 形态、没有 url 字段、或 url 不是 http(s)：都不可跟随。
+        assert_eq!(extract_retry_url("会话已过期，请重新登录电费系统"), None);
+        assert_eq!(extract_retry_url("失败{\"fjh\":\"407\"}"), None);
+        assert_eq!(extract_retry_url("失败{\"url\":\"ftp://host/x\"}"), None);
+        assert_eq!(extract_retry_url("失败{\"url\":\"/relative/path\"}"), None);
+        assert_eq!(extract_retry_url("失败{\"url\":123}"), None);
+        assert_eq!(extract_retry_url("失败 not json"), None);
+    }
+
+    #[test]
+    fn describe_retry_url_strips_the_signature_query() {
+        let described = describe_retry_url(
+            "http://222.197.164.98:7000/zxapi/services/query/findeletric?sign=SECRET&data=SECRET",
+        );
+        assert_eq!(
+            described,
+            "http://222.197.164.98:7000/zxapi/services/query/findeletric"
+        );
+        assert!(!described.contains("SECRET"), "leaked: {}", described);
+        // 控制字符不能借日志行逃逸。
+        assert!(!describe_retry_url("http://x/y\nFORGED").contains('\n'));
+        assert_eq!(describe_retry_url("not a url"), "<invalid retry url>");
     }
 
     #[test]
@@ -1494,6 +1644,11 @@ mod tests {
         let err = classify_body(StatusCode::OK, "application/json", text.len(), text)
             .expect_err("a string payload is a business failure");
         assert!(matches!(err, FetchError::Business { .. }), "got: {:?}", err);
+        // 不是 "失败{json}" 形态：没有可跟随的直连地址。
+        let FetchError::Business { retry_url, .. } = &err else {
+            unreachable!("matched above");
+        };
+        assert!(retry_url.is_none(), "got: {:?}", retry_url);
         let rendered = err.to_string();
         assert!(rendered.contains("non-JSON text"), "got: {}", rendered);
         assert!(
@@ -1606,6 +1761,71 @@ mod tests {
             CappedBody::Complete(read) => panic!("cap not enforced, read {} bytes", read.len()),
             CappedBody::TooLarge { read } => assert!(read > 64, "read={read}"),
         }
+    }
+
+    /// 构造一个指向 `data_url` 的电费网关业务失败响应体（`d` 为 "失败{json}"
+    /// 字符串，json 里带服务端下发的直连地址）。
+    fn business_failure_body_pointing_at(data_url: &str) -> String {
+        serde_json::json!({
+            "e": 0,
+            "m": "操作成功",
+            "d": format!("失败{{\"fjh\":\"407\",\"dffjbh\":\"220407\",\"url\":\"{data_url}\",\"res_hash\":null}}"),
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn gateway_retry_follows_the_server_provided_direct_query_url() {
+        // 门户接口返回业务失败（带直连地址）→ 跟随该地址再取一次 → 拿到读数。
+        let data_url = serve_once(sample_json_with_values("26.91", "14.44").into_bytes()).await;
+        let failure_url =
+            serve_once(business_failure_body_pointing_at(&data_url).into_bytes()).await;
+
+        let client = UestcClient::with_client(reqwest::Client::new());
+        let resp = fetch_power_response_with_gateway_retry(&client, &failure_url)
+            .await
+            .expect("should follow the retry endpoint and succeed");
+        let data = resp.body.data.expect("readings");
+        assert!((data.remaining_money - 14.44).abs() < f64::EPSILON);
+        assert!((data.remaining_energy - 26.91).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn gateway_retry_passes_through_non_business_errors() {
+        // 不是业务失败（响应不是 JSON）：不做任何跟随，直接报错。
+        let url = serve_once(b"not json at all".to_vec()).await;
+        let client = UestcClient::with_client(reqwest::Client::new());
+        let err = fetch_power_response_with_gateway_retry(&client, &url)
+            .await
+            .expect_err("must fail");
+        assert!(matches!(err, FetchError::NotJson { .. }), "got: {:?}", err);
+    }
+
+    #[tokio::test]
+    async fn gateway_retry_propagates_a_failed_retry_request() {
+        // 业务失败带直连地址，但该地址连不上：报跟随失败，不吞掉错误。
+        let failure_url = serve_once(
+            business_failure_body_pointing_at("http://127.0.0.1:1/zxapi/findeletric").into_bytes(),
+        )
+        .await;
+        let client = UestcClient::with_client(reqwest::Client::new());
+        let err = fetch_power_response_with_gateway_retry(&client, &failure_url)
+            .await
+            .expect_err("must fail");
+        let FetchError::FollowFailed { source } = &err else {
+            panic!("expected FollowFailed, got: {:?}", err);
+        };
+        assert!(
+            matches!(**source, FetchError::Transport { .. }),
+            "got: {:?}",
+            source
+        );
+        // 跟随失败是内网网关连通性问题，与门户会话无关：不触发会话探测/重登。
+        assert!(!err.session_may_be_stale(), "got: {:?}", err);
+        // Display 不泄漏直连地址的 query（sign/data）。
+        let rendered = err.to_string();
+        assert!(!rendered.contains("findeletric"), "leaked: {}", rendered);
+        assert!(!rendered.contains("sign="), "leaked: {}", rendered);
     }
 
     #[test]
