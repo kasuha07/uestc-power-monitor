@@ -1,7 +1,7 @@
-# UESTC 统一身份认证账号 (使用 password 登录时必须)
-# 也可不配置，启动时交互式提示输入（密码隐藏回显，不落盘；仅限终端环境）
-username = "your_student_id"
-password = "your_password"
+# 可选：预先配置账号密码，首次启动时尝试自动登录。
+# 留空则启动 Web 登录页，在浏览器输入账号密码或微信扫码，无需重启容器。
+# username = "your_student_id"
+# password = "your_password"
 
 # 登录方式: "password" (默认) 或 "wechat"
 # login_type = "password"
@@ -9,13 +9,14 @@ password = "your_password"
 # Cookie 保存路径 (默认为 "uestc_cookies.json")
 # cookie_file = "uestc_cookies.json"
 # Cookie 落盘加密密钥。
-# password 登录默认使用账号密码派生；wechat 登录或希望密钥独立于密码时请显式设置。
+# 已配置账号密码时保留密码派生密钥的兼容行为；无凭证时自动生成 <cookie_file>.key。
+# 自动生成的密钥由 Web 与 CLI 共同使用，务必与 Cookie 一起保留。
 # 也可使用环境变量 UPM_COOKIE_ENCRYPTION_KEY 或 Docker secret /run/secrets/cookie_encryption_key。
 # cookie_encryption_key = "change-me-to-a-long-random-secret"
 
-# reauth 可信设备弹窗：true=信任此设备（服务端持久化指纹，下次同设备可能免弹窗；
-# 未实测）/ false=仅本次（默认）。仅作终端交互提问"是否记住该设备"的回车默认值，
-# 交互时以提问为准；非终端（无人值守）场景不提交 reauth，不生效。环境变量：UPM_REAUTH_TRUST_DEVICE
+# Web 的“记住此设备”勾选默认值，及终端交互提问的回车默认值。
+# true=默认信任此设备 / false=默认仅本次；提交时以页面选择或终端回答为准。
+# 环境变量 UPM_REAUTH_TRUST_DEVICE。
 # reauth_trust_device = false
 
 # 监控轮询间隔（秒）
@@ -27,6 +28,14 @@ database_url = "sqlite://power_monitor.db"
 # 应用时区（IANA），默认 Asia/Shanghai
 timezone = "Asia/Shanghai"
 
+# Web 登录页（默认启用）。容器通过 UPM_WEB__BIND 覆盖监听地址。
+[web]
+enabled = true
+bind = "127.0.0.1:8080"
+# 可选，至少 32 字符；不配置时自动生成并保存到 Cookie 同目录的 web-access-token。
+# 环境变量 UPM_WEB__ACCESS_TOKEN。
+# access_token = "replace-with-a-long-random-access-token"
+
 # 通知配置
 [notify]
 enabled = true            # 是否启用通知
@@ -37,7 +46,7 @@ heartbeat_hours = [9]     # 每日心跳通知时间（0-23，支持单值或数
 startup_enabled = true    # 是否启用启动通知（首次成功拉取后发送一次）
 
 # 登录失败通知
-login_failure_enabled = true  # 是否启用登录失败通知（启动时登录失败，重试后仍失败时发送并退出）
+login_failure_enabled = true  # 认证失败通知；Web 模式保持运行等待人工登录
 
 # 登录重试失败通知（会话失效后自动重登连续失败达到阈值时发送，默认一天最多一次）
 login_retry_failure_enabled = true  # 是否启用登录重试失败通知（默认 false）
@@ -45,7 +54,7 @@ login_retry_failure_threshold = 3   # 连续失败轮次阈值（默认3轮）
 login_retry_failure_cooldown_minutes = 1440  # 滚动冷却时间（分钟，默认1440 = 一天最多一次）
 
 # reauth 待人工通知（运行期触发多因子二次认证且无人值守无法交互时：
-# 首次立即发送，之后按冷却重复提醒，直到人工运行 `uestc-power-monitor login --force` 完成）
+# 首次立即发送，之后按冷却重复提醒，直到页面登录或终端模式的 login --force 完成）
 reauth_pending_enabled = true        # 是否启用 reauth 待人工通知（默认 false）
 reauth_pending_cooldown_minutes = 30 # 重复提醒冷却时间（分钟，默认30）
 reauth_resolved_enabled = true       # 人工完成 reauth 会话恢复后的确认通知（默认 false）

@@ -7,6 +7,9 @@ edition = "2024"
 members = ["vendor/uestc-client"]
 
 [dependencies]
+axum = "0.8"
+url = "2.5"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 uestc-client = { path = "vendor/uestc-client" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -25,5 +28,6 @@ rpassword = "7"
 # 交互式输入时隐藏密码回显（跨平台，stdin 为终端时使用）
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 # test-util enables paused-clock tests so retry/backoff timing is deterministic.
 tokio = { version = "1", features = ["full", "test-util"] }

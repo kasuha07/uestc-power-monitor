@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>宿舍电费 · UESTC Power Monitor</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<main>
+  <header><span class="logo" aria-hidden="true">ϟ</span><div><p class="eyebrow">UESTC POWER MONITOR</p><h1>宿舍电费</h1></div><span id="badge" class="badge">未连接</span></header>
+  <p class="intro">登录一次，持续关注电费。会话过期后，在这里重新认证即可。</p>
+  <section id="access-panel" class="card">
+    <p class="eyebrow">连接监控</p><h2>输入访问密钥</h2>
+    <p class="hint">首次启动时，访问密钥会显示在程序日志中。它用于保护这个管理页面。</p>
+    <form id="access-form"><label for="token">访问密钥</label><input id="token" type="password" autocomplete="off" required minlength="32"><button type="submit">连接</button></form>
+  </section>
+  <div id="workspace" hidden>
+    <section class="card status-card" aria-live="polite"><div class="status-heading"><span id="dot" class="dot"></span><h2 id="status-title">等待登录</h2><button id="refresh-data" class="secondary" type="button" disabled>立即刷新</button></div><p id="status-message"></p></section>
+    <section id="reading-panel" class="reading-grid" hidden aria-label="最近一次采集">
+      <div class="card reading"><span>剩余电费</span><p><strong id="money">—</strong> 元</p></div>
+      <div class="card reading"><span>剩余电量</span><p><strong id="energy">—</strong> kWh</p></div>
+      <p id="reading-meta" class="hint"></p>
+    </section>
+    <section class="card history-card" aria-labelledby="history-title">
+      <h2 id="history-title">最近采集记录</h2>
+      <p class="hint">最近 10 次成功采集，按时间从新到旧排列。时间按浏览器所在时区显示。</p>
+      <p id="history-message" class="hint" role="status">正在读取记录…</p>
+      <div class="history-scroll"><table id="history-table" hidden>
+        <thead><tr><th scope="col">采集时间</th><th scope="col">宿舍</th><th scope="col">电费 / 元</th><th scope="col">电量 / kWh</th></tr></thead>
+        <tbody id="history-rows"></tbody>
+      </table></div>
+    </section>
+    <section id="qr-panel" class="card qr-panel" hidden><h2>微信扫码认证</h2><img id="qr" alt="微信登录二维码" width="256" height="256"><p class="hint">请使用手机微信扫一扫，并确认登录。认证完成后页面会自动更新。</p></section>
+    <section id="reauth-panel" class="card" hidden>
+      <p class="eyebrow">第二步</p><h2>完成二次认证</h2>
+      <form id="reauth-form">
+        <label for="method">验证方式</label><select id="method"></select>
+        <div id="code-fields"><label for="code">验证码</label><div class="code-row"><input id="code" autocomplete="one-time-code" inputmode="numeric"><button id="send-code" type="button" class="secondary">发送验证码</button></div></div>
+        <div id="reauth-password-fields" hidden><label for="reauth-password">验证密码</label><input id="reauth-password" type="password" autocomplete="current-password"></div>
+        <label class="check"><input id="trust" type="checkbox">记住此设备</label>
+        <button id="verify" type="submit">完成验证</button>
+      </form>
+      <p id="unsupported" class="hint" hidden>这个账号暂时没有可用的验证方式，请重新登录或联系学校认证平台。</p>
+    </section>
+    <section id="login-panel" class="card">
+      <p class="eyebrow">学校统一身份认证</p><h2 id="login-title">登录账号</h2>
+      <form id="login-form">
+        <label for="login-type">登录方式</label><select id="login-type"><option value="password">账号密码</option><option value="wechat">微信扫码</option></select>
+        <div id="password-fields"><label for="username">学号 / 账号</label><input id="username" autocomplete="username"><label for="password">密码</label><input id="password" type="password" autocomplete="current-password"></div>
+        <button id="login-button" type="submit">登录</button>
+      </form>
+      <p class="hint">账号密码只用于本次认证，不保存到配置文件。登录会话加密保存在数据目录中。</p>
+    </section>
+    <button id="cancel" class="secondary" type="button" hidden>取消本次认证</button>
+    <footer><span>服务保持运行 · 登录后自动恢复监控</span><button id="disconnect" class="text-button" type="button">断开页面连接</button></footer>
+  </div>
+  <p id="error" role="alert" hidden></p>
+</main>
+</body>
+</html>

@@ -29,6 +29,26 @@ fn default_cookie_file() -> String {
     "uestc_cookies.json".to_string()
 }
 
+/// Web 登录页默认只监听本机；容器通过环境变量覆盖监听地址。
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct WebConfig {
+    pub enabled: bool,
+    pub bind: String,
+    /// 未指定时自动生成，保存在 Cookie 同目录的 web-access-token 文件。
+    pub access_token: Option<String>,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bind: "127.0.0.1:8080".into(),
+            access_token: None,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub username: Option<String>,
@@ -43,13 +63,15 @@ pub struct AppConfig {
     pub cookie_file: String,
     pub cookie_encryption_key: Option<String>,
     /// reauth 可信设备弹窗：true=信任此设备（服务端持久化指纹，下次同设备可能免弹窗，未实测）/ false=仅本次。
-    /// 仅作终端交互提问"是否记住该设备"的默认值；非终端（无人值守）场景不提交 reauth，不生效。
+    /// Web 勾选默认值与终端交互提问的默认值；提交时以用户选择为准。
     #[serde(default)]
     pub reauth_trust_device: bool,
     #[serde(default = "default_interval")]
     pub interval_seconds: u64,
     #[serde(default)]
     pub notify: NotifyConfig,
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 fn default_interval() -> u64 {
@@ -721,6 +743,18 @@ impl AppConfig {
             errors.push("cookie_encryption_key cannot be empty when set".to_string());
         }
 
+        if self.web.enabled && self.web.bind.parse::<std::net::SocketAddr>().is_err() {
+            errors.push("web.bind must be an IP address and port (e.g. 127.0.0.1:8080)".into());
+        }
+        if self
+            .web
+            .access_token
+            .as_deref()
+            .is_some_and(|v| v.trim().len() < 32)
+        {
+            errors.push("web.access_token must contain at least 32 characters".into());
+        }
+
         // Static validation only: avoid runtime/business dependency checks.
         if self
             .notify
@@ -995,6 +1029,7 @@ heartbeat_hours = 8
             reauth_trust_device: false,
             interval_seconds: 600,
             notify,
+            web: WebConfig::default(),
         }
     }
 

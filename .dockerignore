@@ -15,5 +15,7 @@ config.toml
 *.log
 
 uestc_cookies.json
+*.key
+web-access-token
 data/
 tmp/

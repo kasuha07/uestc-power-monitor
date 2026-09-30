@@ -5,8 +5,17 @@ use sqlx::{Pool, Sqlite};
 use std::path::Path;
 use tracing::{debug, info};
 
+#[derive(Clone)]
 pub struct DbService {
     pool: Pool<Sqlite>,
+}
+
+#[derive(serde::Serialize)]
+pub struct PowerRecord {
+    pub remaining_money: f64,
+    pub remaining_energy: f64,
+    pub room_display_name: String,
+    pub created_at: String,
 }
 
 impl DbService {
@@ -105,6 +114,27 @@ impl DbService {
 
         debug!("Data saved successfully to database");
         Ok(())
+    }
+
+    pub async fn recent_records(&self, limit: u32) -> Result<Vec<PowerRecord>, sqlx::Error> {
+        let rows = sqlx::query_as::<_, (f64, f64, String, String)>(
+            "SELECT remaining_money, remaining_energy, room_display_name, created_at \
+             FROM power_records ORDER BY id DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(remaining_money, remaining_energy, room_display_name, created_at)| PowerRecord {
+                    remaining_money,
+                    remaining_energy,
+                    room_display_name,
+                    created_at,
+                },
+            )
+            .collect())
     }
 }
 

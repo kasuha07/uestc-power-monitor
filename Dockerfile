@@ -58,5 +58,7 @@ ENV UPM_TIMEZONE=Asia/Shanghai
 # Run as distroless non-root user
 USER nonroot:nonroot
 
+EXPOSE 8080
+
 # Run the application
 CMD ["/usr/local/bin/uestc-power-monitor"]

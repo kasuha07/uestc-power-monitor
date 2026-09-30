@@ -4,6 +4,7 @@ pub mod db;
 pub mod notify;
 pub mod time;
 pub mod utils;
+pub mod web;
 
 use crate::api::ApiService;
 use crate::config::{AppConfig, LoginType};
@@ -26,7 +27,7 @@ use tracing::{debug, error, info, warn};
 ///
 /// 无 cookie 文件时直接通过。
 pub async fn logout(clear: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let config = match AppConfig::new() {
+    let mut config = match AppConfig::new() {
         Ok(cfg) => cfg,
         Err(e) => {
             error!("Failed to load configuration: {}", e);
@@ -34,19 +35,19 @@ pub async fn logout(clear: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    web::prepare_cookie_key(&mut config)?;
+
     if !std::path::Path::new(&config.cookie_file).exists() {
         info!("未找到 cookie 文件（{}），无需处理", config.cookie_file);
         return Ok(());
     }
 
-    let cookie_encryption_secret = config
-        .cookie_encryption_secret()
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{e}（无法解密 cookie，可手动删除 cookie 文件）"),
-            )
-        })?;
+    let cookie_encryption_secret = config.cookie_encryption_secret().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{e}（无法解密 cookie，可手动删除 cookie 文件）"),
+        )
+    })?;
     let client = UestcClient::with_encrypted_cookie_file(
         &config.cookie_file,
         cookie_encryption_secret.as_bytes(),
@@ -95,16 +96,20 @@ pub async fn run(
         config.login_type = login_type;
     }
 
-    // 凭据缺失时交互式输入（仅当 stdin 为终端时生效，否则报错提示改用环境变量等）
-    // `force`（`login --force`）时忽略 cookie 捷径，强制要求凭据。
-    if let Err(e) = config.prompt_for_credentials(force) {
-        error!("{}", e);
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e).into());
-    }
-
     if let Err(e) = config.validate() {
         error!("{}", e);
         return Err(Box::new(e));
+    }
+
+    web::prepare_cookie_key(&mut config)?;
+
+    // 凭据缺失时交互式输入（仅当 stdin 为终端时生效，否则报错提示改用环境变量等）
+    // `force`（`login --force`）时忽略 cookie 捷径，强制要求凭据。
+    if (login_only || !config.web.enabled)
+        && let Err(e) = config.prompt_for_credentials(force)
+    {
+        error!("{}", e);
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e).into());
     }
 
     let configured_timezone = config.timezone.trim();
@@ -127,9 +132,19 @@ pub async fn run(
         crate::time::current_timezone_name()
     );
 
+    if config.web.enabled && !login_only {
+        return web::run(config).await;
+    }
+
     // initialize services
     debug!("Initializing API service...");
-    let api_service = match retry(|| ApiService::new(&config, force), 3, Duration::from_secs(5)).await {
+    let api_service = match retry(
+        || ApiService::new(&config, force),
+        3,
+        Duration::from_secs(5),
+    )
+    .await
+    {
         Ok(service) => {
             debug!("API service initialized");
             service

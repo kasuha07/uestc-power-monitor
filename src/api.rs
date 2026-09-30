@@ -60,7 +60,8 @@ fn prompt_line(prompt: &str) -> Result<String, String> {
 }
 
 pub struct ApiService {
-    client: UestcClient,
+    pub(crate) client: UestcClient,
+    browser_mode: bool,
     config: AppConfig,
     login_throttle: LoginThrottle,
     /// `login --force`：忽略"cookie 文件存在"捷径强制走登录流程（跳过本层会话探测；
@@ -78,7 +79,24 @@ pub struct ApiService {
 }
 
 impl ApiService {
-    pub async fn new(config: &AppConfig, force_login: bool) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(
+        config: &AppConfig,
+        force_login: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let service = Self::unlogged(config, force_login, false)?;
+
+        // 首次登录不受冷却限制，但要记进节流器，免得刚启动就立刻重登一次。
+        service.login_throttle.claim(Instant::now(), LOGIN_COOLDOWN);
+        service.login().await?;
+        Ok(service)
+    }
+
+    /// 构造与认证分离：Web 服务不依赖启动时已有会话。
+    pub(crate) fn unlogged(
+        config: &AppConfig,
+        force_login: bool,
+        browser_mode: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let user_display = config.username.as_deref().unwrap_or("unknown");
         debug!("Creating new API service for user: {}", user_display);
         let cookie_encryption_secret = config
@@ -89,19 +107,29 @@ impl ApiService {
             cookie_encryption_secret.as_bytes(),
         );
 
-        let service = Self {
+        Ok(Self {
             client,
+            browser_mode,
             config: config.clone(),
             login_throttle: LoginThrottle::new(),
             force_login,
             login_retry_failure: Mutex::new(false),
             reauth_pending: Mutex::new(false),
-        };
+        })
+    }
 
-        // 首次登录不受冷却限制，但要记进节流器，免得刚启动就立刻重登一次。
-        service.login_throttle.claim(Instant::now(), LOGIN_COOLDOWN);
-        service.login().await?;
-        Ok(service)
+    pub(crate) async fn initialize_business_session(&self) -> Result<(), UestcClientError> {
+        let url = "https://online.uestc.edu.cn/common/actionCasLogin?redirect_url=https://online.uestc.edu.cn/page/";
+        let resp = self.client.get(url).send().await?;
+        resp.error_for_status()?.bytes().await?;
+        if !self.check_session().await.map_err(|error| match error {
+            FetchError::Transport { source, .. } => UestcClientError::from(source),
+            _ => UestcClientError::SessionExpired,
+        })? {
+            return Err(UestcClientError::SessionExpired);
+        }
+        self.client.save_cookies()?;
+        Ok(())
     }
 
     async fn login(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -134,9 +162,13 @@ impl ApiService {
                         Err(e) => return Err(e.into()),
                     }
                 }
-                LoginType::Wechat => {
-                    self.client.wechat_login().await?;
-                }
+                LoginType::Wechat => match self.client.wechat_login().await {
+                    Ok(()) => {}
+                    Err(UestcClientError::ReauthRequired { context }) => {
+                        self.complete_reauth_interactive(*context).await?
+                    }
+                    Err(e) => return Err(e.into()),
+                },
             }
             debug!("Login successful");
             self.clear_login_retry_failure();
@@ -274,12 +306,16 @@ impl ApiService {
             warn!("重载 cookie 文件失败: {}", e);
             return false;
         }
-        self.check_session().await
+        self.check_session().await.unwrap_or(false)
     }
 
     /// 受冷却保护的重新登录。冷却期内直接报错，让这一轮取数失败，
     /// 而不是继续往统一身份认证上撞。
     async fn relogin(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.browser_mode {
+            self.note_reauth_pending();
+            return Err(Box::new(ReauthPendingError));
+        }
         if !self.login_throttle.claim(Instant::now(), LOGIN_COOLDOWN) {
             self.note_login_retry_failure();
             return Err(format!(
@@ -350,31 +386,28 @@ impl ApiService {
         std::mem::take(&mut *flag)
     }
 
-    async fn check_session(&self) -> bool {
-        debug!("Checking session validity...");
-        let url = "https://online.uestc.edu.cn/common/getLanguageTypes.htl";
-        match self.client.post(url).send().await {
-            Ok(resp) => match resp.json::<SessionCheckResponse>().await {
-                Ok(data) => {
-                    let is_valid = data.success;
-                    debug!("Session check result: valid={}", is_valid);
-                    is_valid
-                }
-                Err(e) => {
-                    // 同样经 `FetchError::transport` 剥掉 URL：这个请求也可能被
-                    // CAS 重定向，最终 URL 会带上 ticket。
-                    debug!(
-                        "Failed to parse session check response: {}",
-                        FetchError::transport(e)
-                    );
-                    false
-                }
-            },
-            Err(e) => {
-                debug!("Session check request failed: {}", FetchError::transport(e));
-                false
-            }
+    async fn check_session(&self) -> Result<bool, FetchError> {
+        // Current portal frontend checks GET /site/user_info; the old language
+        // endpoint returns 404 even after CAS authentication succeeds.
+        let url = "https://online.uestc.edu.cn/site/user_info";
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(FetchError::transport)?;
+        // 登录重定向返回 HTML 表示会话失效；纯网络失败不应被当作失效。
+        if resp.url().host_str() == Some("idas.uestc.edu.cn")
+            || resp.status() == StatusCode::UNAUTHORIZED
+        {
+            return Ok(false);
         }
+        let resp = resp.error_for_status().map_err(FetchError::transport)?;
+        let data = resp
+            .json::<SessionCheckResponse>()
+            .await
+            .map_err(FetchError::transport)?;
+        Ok(data.e == 0)
     }
 
     /// 发一次请求并解析响应体。
@@ -397,7 +430,7 @@ impl ApiService {
             Ok(resp) => resp,
             Err(e) if e.session_may_be_stale() => {
                 warn!("Power data request failed: {}. Checking session...", e);
-                if self.check_session().await {
+                if self.check_session().await? {
                     return Err(e.into());
                 }
                 debug!("Session invalid, re-login and retry...");
@@ -1290,7 +1323,7 @@ pub struct ApiResponse<T> {
 
 #[derive(Debug, Deserialize)]
 struct SessionCheckResponse {
-    success: bool,
+    e: i64,
 }
 
 #[cfg(test)]

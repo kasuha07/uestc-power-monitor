@@ -4,7 +4,12 @@
 vendor/*/target/
 vendor/*/Cargo.lock
 config.toml
+.env
+.env.*
+!.env.example
 uestc_cookies.json
+*.key
+web-access-token
 *.db
 *.db-shm
 *.db-wal

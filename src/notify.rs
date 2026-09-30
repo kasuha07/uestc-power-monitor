@@ -462,6 +462,19 @@ impl NotificationManager {
     /// 通知，之后按 `reauth_pending_cooldown_minutes` 滚动冷却重复提醒
     /// （默认 30 分钟——人不在终端前，提醒要勤但不能刷屏），直到会话恢复。
     pub async fn record_reauth_pending(&mut self, error_msg: &str) {
+        self.record_pending_auth(error_msg,
+            "请在终端运行 `uestc-power-monitor login --force` 完成认证，\n监控检测到会话恢复后会自动继续。").await;
+    }
+
+    pub async fn record_web_auth_pending(&mut self, error_msg: &str) {
+        self.record_pending_auth(
+            error_msg,
+            "请打开 Web 登录页完成认证，登录成功后监控会自动继续，无需重启容器。",
+        )
+        .await;
+    }
+
+    async fn record_pending_auth(&mut self, error_msg: &str, recovery_hint: &str) {
         if !self.config.enabled || !self.config.reauth_pending_enabled {
             return;
         }
@@ -476,12 +489,7 @@ impl NotificationManager {
 
         if should_notify {
             info!("Sending reauth pending notification...");
-            let msg = format!(
-                "需要人工完成二次认证（reauth）:\n{}\n\
-                 请在终端运行 `uestc-power-monitor login --force` 完成认证，\n\
-                 daemon 检测到会话恢复后会自动继续监控。",
-                error_msg
-            );
+            let msg = format!("需要人工完成认证：\n{error_msg}\n{recovery_hint}");
             let report = self
                 .notify_error_all(&msg, NotificationEvent::ReauthPending)
                 .await;

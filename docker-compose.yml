@@ -7,12 +7,12 @@ services:
 
     container_name: uestc-power-monitor
     restart: unless-stopped
+    # 已有数据可在 .env 设置 UPM_UID/UPM_GID，使运行用户与 data/ 属主一致。
+    user: "${UPM_UID:-65532}:${UPM_GID:-65532}"
 
-    # 如需在容器内交互式输入凭据（启动时提示输入用户名/密码），可取消下面两行注释：
-    # 注意：仅前台运行（docker compose run --rm app / docker start -ai）时交互才可见；
-    # 后台启动时程序会检测到无人连接并直接报错退出（提示行在无人 TTY 上不可见）。
-    # tty: true
-    # stdin_open: true
+    # 默认只开放到宿主机本地。远程访问可用 SSH 转发，或在 HTTPS 反代后开放。
+    ports:
+      - "127.0.0.1:8080:8080"
 
     volumes:
       # 本地配置文件（建议先 cp config.toml.example config.toml）
@@ -25,11 +25,16 @@ services:
       UPM_TIMEZONE: Asia/Shanghai
       UPM_DATABASE_URL: sqlite://data/power_monitor.db
       UPM_COOKIE_FILE: data/uestc_cookies.json
+      UPM_WEB__BIND: "0.0.0.0:8080"
+
+      # 页面访问密钥默认自动生成并保存在 data/web-access-token。
+      # 也可指定至少 32 字符的固定密钥：
+      # UPM_WEB__ACCESS_TOKEN: "replace-with-a-long-random-access-token"
 
       # 如果你不想把账号密码写进 config.toml，也可以取消下面两行注释：
       # UPM_USERNAME: "2023xxxxxxx"
       # UPM_PASSWORD: "your_password"
-      # 如使用 wechat 登录，或希望 Cookie 加密密钥独立于账号密码，请配置：
+      # 未配置账号密码时自动生成独立 Cookie 密钥，保存在 data/ 中；也可显式配置：
       # UPM_COOKIE_ENCRYPTION_KEY: "change-me-to-a-long-random-secret"
 
       # 如需代理可取消注释：

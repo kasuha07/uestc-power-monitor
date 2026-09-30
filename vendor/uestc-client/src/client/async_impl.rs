@@ -49,6 +49,28 @@ impl UestcClient {
         path: P,
         cookie_encryption_secret: Option<Vec<u8>>,
     ) -> Self {
+        Self::with_cookie_file_secret_and_builder(path, cookie_encryption_secret, Client::builder())
+    }
+
+    /// Use a custom transport (for example an explicit proxy), retaining the same
+    /// encrypted cookie store, timeout defaults and authentication protocol.
+    pub fn with_encrypted_cookie_file_and_builder<P: AsRef<Path>, S: AsRef<[u8]>>(
+        path: P,
+        encryption_secret: S,
+        builder: reqwest::ClientBuilder,
+    ) -> Self {
+        Self::with_cookie_file_secret_and_builder(
+            path,
+            Some(encryption_secret.as_ref().to_vec()),
+            builder,
+        )
+    }
+
+    fn with_cookie_file_secret_and_builder<P: AsRef<Path>>(
+        path: P,
+        cookie_encryption_secret: Option<Vec<u8>>,
+        builder: reqwest::ClientBuilder,
+    ) -> Self {
         let cookie_file = path.as_ref().to_path_buf();
 
         // Try to load existing cookies
@@ -63,10 +85,9 @@ impl UestcClient {
                         }
                         Err(e) => {
                             log::warn!("加载加密 cookie 失败: {}", e);
-                            remove_cookie_file(
-                                &cookie_file,
-                                "无法按加密格式读取，不保留旧格式或损坏的 cookie",
-                            );
+                            // An incorrect key must not destroy the previous session file.
+                            // A later successful login may replace it with valid cookies.
+                            log::warn!("保留无法读取的 cookie 文件，等待配置正确密钥或重新登录");
                             Arc::new(CookieStoreMutex::new(CookieStore::default()))
                         }
                     }
@@ -84,7 +105,7 @@ impl UestcClient {
             Arc::new(CookieStoreMutex::new(CookieStore::default()))
         };
 
-        let client = Client::builder()
+        let client = builder
             .default_headers(super::default_headers())
             .cookie_provider(cookie_store.clone())
             .connect_timeout(super::CONNECT_TIMEOUT)
@@ -129,6 +150,11 @@ impl UestcClient {
             .filter(|v| !v.is_empty())
             .map(str::to_string)
             .unwrap_or_else(core::bfp::random_fingerprint)
+    }
+
+    /// 显式持久化当前会话，供需要确认落盘成功的调用方使用。
+    pub fn save_cookies(&self) -> Result<()> {
+        self.save_cookie_store()
     }
 
     fn save_cookie_store(&self) -> Result<()> {
@@ -286,6 +312,15 @@ impl UestcClient {
     /// Login using WeChat QR code
     /// This will display a QR code in the terminal for scanning
     pub async fn wechat_login(&self) -> Result<()> {
+        self.wechat_login_with_qr(crate::core::wechat::display_qr_in_terminal)
+            .await
+    }
+
+    /// 微信登录，取得二维码 UUID 后交给调用方展示；保留原有轮询与超时策略。
+    pub async fn wechat_login_with_qr<F>(&self, on_qr: F) -> Result<()>
+    where
+        F: Fn(&str) -> Result<()> + Send + Sync,
+    {
         use crate::core::wechat;
 
         // Check if session is already active
@@ -326,7 +361,7 @@ impl UestcClient {
         let uuid = wechat::parse_qr_uuid_from_xml(&xml_text)?;
 
         // Step 3: Display QR code in terminal
-        wechat::display_qr_in_terminal(&uuid)?;
+        on_qr(&uuid)?;
 
         // Step 4: Poll for scan status
         log::debug!("等待扫码");
@@ -398,16 +433,11 @@ impl UestcClient {
         let resp = self.client.get(&callback_url).send().await?;
         let final_url = resp.url().to_string();
 
-        // Consume the response body to ensure cookies are properly captured
-        let _ = resp.bytes().await?;
-
-        // 按约定（2026-08-07 决策）：微信扫码视为不触发 reauth。
-        // 若服务端实际把扫码后的 TGT 锁了（落回 reauth 页），这里只记警告不报错——
-        // 业务请求会失败并走调用方的会话恢复路径。
+        let body = resp.text().await?;
         if is_reauth_url(&final_url) {
-            log::warn!(
-                "微信扫码后进入 reauth 页（TGT 被多因子锁定）。当前实现按'扫码不触发 reauth'处理，返回成功；若后续业务请求失败，请改用密码登录并完成 reauth"
-            );
+            return Err(UestcClientError::ReauthRequired {
+                context: Box::new(reauth::parse_reauth_page(&body)?),
+            });
         }
 
         // Check if login succeeded by examining the final URL
@@ -523,6 +553,30 @@ impl UestcClient {
         password: Option<&str>,
         skip_tmp_reauth: bool,
     ) -> Result<()> {
+        self.submit_reauth_with_qr(
+            ctx,
+            method,
+            code,
+            password,
+            skip_tmp_reauth,
+            crate::core::wechat::display_qr_in_terminal,
+        )
+        .await
+    }
+
+    /// 二次认证的二维码展示回调版本，终端与 Web 共用同一协议实现。
+    pub async fn submit_reauth_with_qr<F>(
+        &self,
+        ctx: &ReauthContext,
+        method: &ReauthMethod,
+        code: Option<&str>,
+        password: Option<&str>,
+        skip_tmp_reauth: bool,
+        on_qr: F,
+    ) -> Result<()>
+    where
+        F: Fn(&str) -> Result<()> + Send + Sync,
+    {
         // 服务端按 reAuthType 字段校验凭证：提交非当前方式必失败（reAuth_failed）。
         // 微信走外部 OAuth 不提交 reAuthType，无需先切换。
         if method.kind() != ReauthMethodKind::Wechat && ctx.re_auth_type != method.id.to_string() {
@@ -536,7 +590,10 @@ impl UestcClient {
 
         // 成功后保存 cookie（`--reauth` 等调用方依赖落盘会话，供其他进程重载）
         let result = match method.kind() {
-            ReauthMethodKind::Wechat => self.submit_wechat_reauth(ctx, skip_tmp_reauth).await,
+            ReauthMethodKind::Wechat => {
+                self.submit_wechat_reauth(ctx, skip_tmp_reauth, &on_qr)
+                    .await
+            }
             ReauthMethodKind::DynamicCode => {
                 let form = reauth::submit_form(ctx, code, None, skip_tmp_reauth);
                 self.submit_reauth_form(ctx, form).await
@@ -589,7 +646,15 @@ impl UestcClient {
 
     /// 微信扫码 reauth（type 8/16）：combinedLogin reAuth=2 → 微信 OAuth → 终端二维码
     /// → 轮询 → callback → /login 链路直接发 ST。扫码动作需人工手机微信。
-    async fn submit_wechat_reauth(&self, ctx: &ReauthContext, skip_tmp_reauth: bool) -> Result<()> {
+    async fn submit_wechat_reauth<F>(
+        &self,
+        ctx: &ReauthContext,
+        skip_tmp_reauth: bool,
+        on_qr: &F,
+    ) -> Result<()>
+    where
+        F: Fn(&str) -> Result<()> + Send + Sync,
+    {
         use crate::core::wechat;
 
         // Step 1: combinedLogin（reauth 版）→ 302 微信 OAuth
@@ -633,7 +698,7 @@ impl UestcClient {
         };
 
         // Step 3: 终端二维码（与登录版一致）
-        wechat::display_qr_in_terminal(&uuid)?;
+        on_qr(&uuid)?;
 
         // Step 4: 轮询扫码状态（同一套健壮性守卫）
         log::debug!("等待扫码（reauth）");

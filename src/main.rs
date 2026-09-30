@@ -8,27 +8,25 @@ use uestc_power_monitor::time;
 /// 打印命令行用法说明。
 fn print_usage() {
     // 不用行尾 `\` 续行：它会吃掉下一行的前导空白，导致排版缩进丢失。
-    println!(
-        concat!(
-            "UESTC Power Monitor - 宿舍电费监控\n",
-            "\n",
-            "用法:\n",
-            "  uestc-power-monitor                启动监控（默认）\n",
-            "  uestc-power-monitor login          登录并交互完成二次认证（reauth）后退出；\n",
-            "                                      会话有效时直接通过（幂等）\n",
-            "  uestc-power-monitor login --force  强制重新登录（忽略 cookie 文件捷径，\n",
-            "                                      凭据缺失时交互输入；服务端会话实际\n",
-            "                                      有效时客户端会复用，不重复登录）\n",
-            "  uestc-power-monitor login --type <password|wechat>\n",
-            "                                      指定本次登录方式（默认取配置 login_type）\n",
-            "  uestc-power-monitor logout          登出当前会话（保留本地 cookie 与\n",
-            "                                      设备指纹，下次登录仍识别为可信设备）\n",
-            "  uestc-power-monitor logout --clear  登出并彻底清除本地 cookie（含设备指纹，\n",
-            "                                      下次登录视为新设备）\n",
-            "\n",
-            "凭据与配置: 环境变量 UPM_* / 配置文件 / Docker Secrets（见 README）\n",
-        )
-    );
+    println!(concat!(
+        "UESTC Power Monitor - 宿舍电费监控\n",
+        "\n",
+        "用法:\n",
+        "  uestc-power-monitor                启动 Web 登录页与监控（默认）\n",
+        "  uestc-power-monitor login          登录并交互完成二次认证（reauth）后退出；\n",
+        "                                      会话有效时直接通过（幂等）\n",
+        "  uestc-power-monitor login --force  强制重新登录（忽略 cookie 文件捷径，\n",
+        "                                      凭据缺失时交互输入；服务端会话实际\n",
+        "                                      有效时客户端会复用，不重复登录）\n",
+        "  uestc-power-monitor login --type <password|wechat>\n",
+        "                                      指定本次登录方式（默认取配置 login_type）\n",
+        "  uestc-power-monitor logout          登出当前会话（保留本地 cookie 与\n",
+        "                                      设备指纹，下次登录仍识别为可信设备）\n",
+        "  uestc-power-monitor logout --clear  登出并彻底清除本地 cookie（含设备指纹，\n",
+        "                                      下次登录视为新设备）\n",
+        "\n",
+        "Web 默认地址: http://127.0.0.1:8080（访问密钥见启动日志）\n凭据与配置: 环境变量 UPM_* / 配置文件 / Docker Secrets（见 README）\n",
+    ));
 }
 
 struct LocalTimeFormatter;
@@ -124,11 +122,14 @@ async fn main() {
         println!("login 模式：完成登录（含二次认证）后退出{type_hint}，不进入监控循环");
     }
     if logout_only {
-        println!("logout 模式：登出当前会话（{}）", if clear {
-            "并清除本地 cookie".to_string()
-        } else {
-            "保留本地 cookie".to_string()
-        });
+        println!(
+            "logout 模式：登出当前会话（{}）",
+            if clear {
+                "并清除本地 cookie".to_string()
+            } else {
+                "保留本地 cookie".to_string()
+            }
+        );
     }
 
     let result = if logout_only {

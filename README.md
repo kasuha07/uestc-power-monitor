@@ -12,8 +12,9 @@
 - **自动重试与会话恢复**：请求失败自动重试；检测到会话失效会自动重新登录。
   电费网关要求直连内网查询时，自动跟随服务端下发的重试地址（sign/data 由服务端
   生成，客户端无需也无法自行计算）。
-- **reauth 二次认证支持**：账号触发多因子认证时，启动（终端）交互式完成；
-  无人值守时发送通知等待人工，人工跑 `login --force` 后 daemon 自动恢复。
+- **Web 登录页**：启动后在浏览器输入账号密码、微信扫码或完成短信/企微二次认证。
+  缺少凭证、登录失败、会话过期时容器保持运行；登录成功后自动恢复监控。
+- **reauth 二次认证支持**：Web 与终端登录共用认证协议，支持选择验证方式和记住设备。
 - **SQLite 持久化**：每次采样写入 `power_records`，便于后续统计分析。
 - **多事件通知**：
   - 低余额告警
@@ -45,15 +46,14 @@ src/
 
 ## 工作流程
 
-1. 启动并加载配置（优先级：**环境变量 > Docker Secrets > 配置文件**）。
-2. 初始化 API 服务并登录 UESTC 平台。
-3. 初始化 SQLite 连接池并创建表。
-4. 进入循环：
-   - 拉取电费数据
-   - 写入数据库
-   - 判断并发送通知
-   - 休眠到下一个轮询周期
-5. 捕获 `SIGINT/SIGTERM` 后优雅退出。
+1. 加载配置并初始化 SQLite、Web 登录页和通知模块。
+2. 尝试恢复已有 Cookie；没有会话时等待浏览器登录，不退出、不反复尝试密码。
+3. 用户在页面完成认证后，验证电费门户会话并加密保存 Cookie，立即唤醒监控。
+4. 定时采集电费数据，写入数据库并判断通知条件。
+5. 会话过期时暂停采集，保留最近读数并等待重新登录；网络/上游故障按采集周期重试。
+6. 捕获 `SIGINT/SIGTERM` 后退出。
+
+设置 `web.enabled = false` 可恢复原有终端启动、自动重登录行为。
 
 ---
 
@@ -72,15 +72,15 @@ cp config.toml.example config.toml
 
 按需修改 `config.toml`：
 
-- `username` / `password`
+- `username` / `password`（可留空，改用 Web 登录）
 - `database_url`（如 `sqlite://power_monitor.db`）
 - `notify` 下的通知配置
 
-> **不想把账号密码写进配置文件？** 可以不配置 `username`/`password`，
-> 启动时程序会交互式提示输入（密码隐藏回显，不落盘）。
-> 注意：交互输入要求标准输入为真实终端；在 systemd、CI、后台运行的 Docker
-> 容器等非终端/无人连接环境，程序会直接报错而不是挂起等待输入，请改用环境变量、
-> Docker Secrets 或配置文件提供凭据。
+默认无需在配置文件里保存账号密码。启动后打开 `http://127.0.0.1:8080`，
+输入启动日志显示的 **Web 访问密钥**，再登录学校账号。
+密码只在内存中用于本次认证，页面不会把密码写入配置文件。
+
+`login --force` 子命令仍支持终端输入账号密码；禁用 Web 后，默认启动也保留终端交互。
 
 ### 3）运行
 
@@ -101,40 +101,78 @@ cargo build --release
 
 ### 使用 compose（推荐）
 
+准备配置文件和可写数据目录。镜像使用 UID/GID `65532` 的非 root 用户，绑定挂载的
+`data/` 需要允许该用户写入；以下命令适用于新建目录，已有数据请按实际属主处理：
+
 ```bash
+cp config.toml.example config.toml
+mkdir -p data
+sudo chown 65532:65532 data
+# 非 root 用户需要读取配置文件，请保证文件可读。
 docker compose up -d --build
+docker compose logs app
 ```
 
-默认 compose 文件使用镜像：
+如果已有 `data/` 属于宿主机用户，可在项目 `.env` 中设置实际 UID/GID，让容器使用
+相同用户运行，无需修改现有数据属主。例如 `stat -c '%u:%g' data` 返回 `1000:1000` 时：
 
-- `ghcr.io/kasuha07/uestc-power-monitor:latest`
+```dotenv
+UPM_UID=1000
+UPM_GID=1000
+```
 
-并挂载：
+修改后执行 `docker compose up -d`。`.env` 不纳入 Git，未设置时仍使用 `65532:65532`。
+属主不匹配会导致 `Permission denied` 并反复重启；数据目录需要可写，配置文件需要可读。
 
-- `./config.toml -> /app/config.toml`
-- `./data -> /app/data`
+当前 compose 默认从本地源码构建，并挂载：
 
-> **容器内交互式输入凭据？** compose 创建的容器默认没有 TTY，`docker start -ai`
-> 也无法事后补分配（TTY 是容器创建时决定的属性），此时程序会报
-> “标准输入不是终端”而非挂起。推荐在宿主机终端用**交互登录**生成 Cookie，
-> 之后即可无人值守运行：
->
-> ```bash
-> # 方式一：临时容器，交互登录（输入账号密码、必要时完成二次认证）后退出（推荐）
-> # 注意：`login --force` 前必须跟二进制完整路径（compose run 的参数会覆盖镜像 CMD）
-> docker compose run --rm app /usr/local/bin/uestc-power-monitor login --force
-> # 登录成功后 Cookie 保存在 data/ 卷，正常后台启动即可：
-> docker compose up -d
->
-> # 方式二：compose 文件里为 app 服务加 `tty: true` + `stdin_open: true`
-> # 后重建容器，再 `docker start -ai uestc-power-monitor` 交互输入账号密码
-> ```
->
-> 注意：即便容器带 TTY，**后台启动（如 `docker compose up -d`）时程序仍会
-> 拒绝交互输入**——无人连接的 TTY 上提示行不可见（`docker logs` 也看不到），
-> 程序会直接报错退出，请改用环境变量 / Docker Secrets / 配置文件提供凭据。
-> 若未配置凭据就后台启动，容器会在 `restart: unless-stopped` 下反复重启
-> 并刷屏报“凭据缺失”，此时按方式一登录一次即可恢复。
+- `./config.toml -> /app/config.toml`（只读）
+- `./data -> /app/data`（数据库、加密 Cookie、Cookie 密钥和 Web 访问密钥）
+
+启动后访问 **http://127.0.0.1:8080**，输入日志中的 Web 访问密钥，再在页面：
+
+1. 输入账号密码，或选择微信扫码。
+2. 若需要二次认证，选择微信扫码、短信或企微验证码等可用方式。
+3. 登录完成后监控立即开始，无需重启容器。
+
+页面显示数据库中最近 10 次成功采集记录（时间、宿舍、电费、电量），重启后仍可查看。
+“立即刷新”会使用当前会话立即采集一次；认证或采集期间不可重复触发。采集失败时保留
+已保存的历史记录，新的成功读数会自动追加到历史记录中。
+
+无凭证、密码错误、认证超时或 Cookie 过期时，容器保持运行并等待人工处理。
+同一时间只允许一个认证操作，扫码期间可取消后重新发起。验证码重发间隔为 60 秒。
+
+### 远程访问
+
+compose 默认将端口映射到宿主机回环地址。服务器部署可使用 SSH 转发：
+
+```bash
+ssh -L 8080:127.0.0.1:8080 your-server
+```
+
+然后在本机浏览器访问 `http://127.0.0.1:8080`。如需直接远程开放，请在 HTTPS 反代后
+访问，并保留访问密钥保护；不要在公网明文 HTTP 上传学校密码。
+
+### 页面访问密钥
+
+默认自动生成 64 字符随机密钥，保存在 `data/web-access-token`，权限 `0600`。
+密钥在程序启动日志中显示；输入后仅保存在当前浏览器标签页的会话存储中。
+也可以通过 `UPM_WEB__ACCESS_TOKEN` 或 `web.access_token` 指定至少 32 字符的固定密钥。
+所有认证接口和状态查询都需要密钥，且禁止跨来源请求；响应禁止缓存。
+
+`/healthz` 是进程存活检查，即使等待登录也返回 `200`，不会因为没有凭证触发重启。
+
+### 保留终端登录方式
+
+Web 默认启用，也可通过配置 `web.enabled = false` 或环境变量 `UPM_WEB__ENABLED=false`
+关闭。独立登录命令仍可使用：
+
+```bash
+docker compose run --rm app /usr/local/bin/uestc-power-monitor login --force
+```
+
+Web 模式由同一个进程管理登录和监控，建议使用页面完成恢复。关闭 Web 时，运行期
+reauth 的恢复仍使用独立 `login --force` 命令和 Cookie 重载机制。
 
 ---
 
@@ -145,7 +183,7 @@ docker compose up -d --build
 1. 环境变量（`UPM_` 前缀）
 2. Docker Secrets（`/run/secrets/*`）
 3. 配置文件（`config.toml`）
-4. 交互式输入（启动时凭据缺失且 stdin 为终端时提示）
+4. Web 页面输入（默认）或终端交互输入（`login` 子命令 / 禁用 Web 时）
 
 > `UPM_TIMEZONE` 会在反序列化后再次覆盖，保证时区优先级生效。
 
@@ -162,9 +200,12 @@ docker compose up -d --build
 | `interval_seconds` | 轮询间隔（秒） | `600` |
 | `timezone` | 应用时区 | `Asia/Shanghai` |
 | `login_type` | 登录方式：`password` / `wechat` | `password` |
-| `reauth_trust_device` | reauth 交互提问"是否记住该设备"的回车默认值：`true`=默认记住 / `false`=默认仅本次；非终端（无人值守）不生效 | `false` |
+| `reauth_trust_device` | Web 的“记住此设备”勾选默认值，及终端提问的回车默认值 | `false` |
 | `cookie_file` | 加密 Cookie 持久化文件 | `uestc_cookies.json` |
-| `cookie_encryption_key` | Cookie 落盘加密密钥；`password` 登录可默认由账号密码派生，`wechat` 登录必须显式配置 | 无 |
+| `cookie_encryption_key` | 显式 Cookie 加密密钥；无凭证时自动生成并持久化，已有密码派生方式兼容 | 自动解析 |
+| `web.enabled` | 启用 Web 登录页 | `true` |
+| `web.bind` | Web 监听地址（Compose 覆盖为 `0.0.0.0:8080`） | `127.0.0.1:8080` |
+| `web.access_token` | 页面访问密钥，至少 32 字符；未指定则随机生成并持久化 | 自动生成 |
 | `notify.enabled` | 是否启用通知 | `false` |
 | `notify.threshold` | 低余额阈值（元） | `5.0` |
 | `notify.cooldown_minutes` | 低余额重复提醒冷却（分钟） | `520` |
@@ -191,7 +232,7 @@ UPM_USERNAME=2023xxxxxxx
 UPM_PASSWORD=your_password
 UPM_DATABASE_URL=sqlite://data/power_monitor.db
 UPM_TIMEZONE=Asia/Shanghai
-# 可选：使用独立 Cookie 加密密钥；wechat 登录时必填
+# 可选：指定独立 Cookie 加密密钥；无凭证时也可由程序自动生成
 UPM_COOKIE_ENCRYPTION_KEY=change-me-to-a-long-random-secret
 UPM_NOTIFY__ENABLED=true
 UPM_NOTIFY__STARTUP_ENABLED=true
@@ -216,7 +257,11 @@ UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 - 兼容旧版明文 Cookie 文件：启动时若检测到旧格式（未加密的 JSON 数组），会自动迁移为加密格式并继续使用，无需重新登录。
 - 损坏的 Cookie 文件会被忽略，并在下次成功登录后写成新的加密格式。
 - `password` 登录如果没有显式配置 `cookie_encryption_key`，会使用账号和密码作为密钥材料派生加密密钥。
-- `wechat` 登录无法从密码派生密钥，必须配置 `cookie_encryption_key`（推荐使用环境变量或 Docker Secret）。
+- 未配置账号密码、且没有显式密钥时，自动生成 `<cookie_file>.key`，权限 `0600`。
+  后续启动与 CLI 登录优先复用该密钥；请与 Cookie 文件一起备份，丢失后需要重新登录。
+- 已配置账号密码、尚无自动密钥文件时保留原有密码派生方式，以兼容现有 Cookie。
+  已有 Cookie 使用显式密钥时，请继续配置同一密钥。
+- 读取失败不会删除已有加密 Cookie 文件；成功登录会写入新的加密会话。
 
 ### 网络与登录超时
 
@@ -231,42 +276,23 @@ UPM_NOTIFY__NOTIFY_TYPES=telegram,ntfy,email
 | 轮询连续失败容忍次数 | 5 次（偶发抖动不会作废二维码） |
 | 连续未知状态码容忍次数 | 10 次（接口变更时不会无限轮询） |
 
-登录整体再由 `retry` 包一层：最多 3 次、指数退避封顶 60 秒，全部失败后发送 `LoginFailure` 通知并退出。
+Web 模式一次提交只尝试一次认证，失败后显示状态并等待人工，避免反复提交错误密码。
+禁用 Web 的终端启动模式保留原有三次重试和失败退出行为。
 
-### `wechat` 登录的适用场景
+### 微信扫码与二次认证
 
-微信扫码是**一次性交互式**认证，而本服务是长期无人值守运行的。两者靠 Cookie 衔接：
-只要 `cookie_file` 中的会话有效就不会重新扫码。但一旦 CAS 会话彻底过期，重新登录
-会在**服务端终端**打印二维码——容器或后台进程里没人能扫，5 分钟后超时，重试 3 次
-后告警退出。
+默认 Web 模式下，微信登录与微信二次认证的二维码直接显示在页面，认证库在后台
+轮询扫码状态，五分钟内未完成会失败。页面轮询状态不会阻塞扫码流程。
+密码登录遇到 reauth 时，页面列出账号已开通且程序支持的方式：微信扫码、短信/企微等
+动态码、密码二次认证。可以勾选“记住此设备”，默认值来自 `reauth_trust_device`。
 
-因此 `wechat` 建议只用于本地或可交互环境；Docker / systemd 等长跑部署请使用
-`password` 登录。
+会话过期后，页面显示等待登录，暂停采集并保留最近读数。通知使用现有
+`ReauthPending` 冷却设置；再次认证并验证业务会话后自动恢复，发送 `ReauthResolved`。
+启动第一次登录后的通知使用 `Startup`。
 
-### reauth（多因子二次认证）与无人值守恢复
-
-UESTC 统一认证启用了多因子策略：密码登录成功后会被 302 到 reauth 页（TGT 已发但
-被锁定），必须完成第二因素才能换取服务票据。reauth 的可用方式（微信扫码 / 短信 /
-企业微信验证码等）**都需要人工参与**，且 TGT 是会话级 cookie，会话过期后重登会再次
-触发 reauth。
-
-- **启动（终端）**：触发 reauth 时自动列出可用方式，交互选择后完成
-  （微信扫码在终端打印二维码，用手机微信扫；短信/企微码输入收到的验证码）。
-  提交前会**提问是否记住该设备**（可信设备弹窗）：回车采用配置
-  `reauth_trust_device` 的默认值，输入 `y` 则信任此设备（下次同设备可能免二次认证）。
-- **无人值守运行期**：触发 reauth 时**不自动重试**（避免拿账号撞锁），发送
-  `ReauthPending` 通知（首次立即、之后每 30 分钟重复提醒），进入等待模式。
-- **人工恢复**：在终端运行 `uestc-power-monitor login`（登录 + 交互完成 reauth
-  + 保存 cookie 后退出，不进入监控循环；会话已有效时幂等通过）。会话失效且未
-  配置账号密码时，普通 `login` 会因缺少凭据报错，请改用 `uestc-power-monitor
-  login --force`：忽略"cookie 文件存在"捷径强制重新登录，并交互提示输入账号密码
-  （服务端会话实际仍有效时，客户端会直接复用现有会话，不会重复登录）。
-  `login --type <password|wechat>` 可指定本次登录方式（默认取配置 `login_type`），
-  例如 `uestc-power-monitor login --type wechat` 走微信扫码登录。
-  daemon 会在下个轮询周期检测到会话恢复，自动继续监控并发送 `ReauthResolved`
-  确认通知。
-- 相关配置：`reauth_trust_device`（可信设备弹窗）、`notify.reauth_pending_*`、
-  `notify.reauth_resolved_enabled`。
+禁用 Web 时，原有终端模式仍支持 `login --force`、`login --type wechat`、`logout`：
+运行期触发 reauth 后等待人工，独立登录保存 Cookie 后按采集周期恢复。
+默认 Web 模式请通过页面重新认证，避免多个进程同时更新 Cookie。
 
 ---
 
@@ -277,7 +303,7 @@ UESTC 统一认证启用了多因子策略：密码登录成功后会被 302 到
 - **LowBalance**：余额低于阈值时触发（支持冷却与边沿触发逻辑）
 - **Startup**：服务启动后首次成功拉取时触发
 - **Heartbeat**：每天在一个或多个指定小时发送状态心跳
-- **LoginFailure**：启动登录失败时发送
+- **LoginFailure**：认证失败时发送（Web 模式保持运行）
 - **LoginRetryFailure**：运行期会话失效后重登连续失败达到阈值时发送（滚动冷却，默认一天最多一次）
 - **ReauthPending**：运行期触发 reauth（多因子）且无人值守无法交互时发送（首次立即、之后按冷却重复，默认 30 分钟）
 - **ReauthResolved**：人工完成 reauth、daemon 会话恢复后发送（一次性确认）
@@ -353,31 +379,26 @@ cargo test
 - Webhook/ntfy 的安全 URL 校验
 - SMTP 加密模式限制
 - 入库时间格式正确性
+- Web 无凭证等待、访问密钥与来源校验、并发认证和取消
+- 本地 HTTPS 模拟学校/微信：密码登录、二次认证、验证码重发冷却、扫码与 Cookie 恢复
+- Web 登录唤醒监控、会话过期暂停与再次登录恢复
 
 ---
 
 ## 常见问题
 
-### 1）启动时报登录失败
+### 1）页面显示等待登录或登录失败
 
-- 检查学号/密码是否正确
-- 检查网络是否可访问 UESTC 服务
-- 若使用 `wechat` 登录，确认对应登录流程可用
-- 若报错为"需要人工完成二次认证（reauth）"：无人值守（非终端）环境无法交互完成
-  reauth，请在终端运行 `uestc-power-monitor login --force` 完成认证后重启；
-  或配置通知渠道并在运行期等待 `ReauthPending` 通知后按上述流程恢复
+- 打开 Web 登录页并输入启动日志中的访问密钥。
+- 检查账号密码；若学校要求密码登录图形验证码，可改用微信扫码。
+- 若需要二次认证，按页面提示选择方式并完成验证。
+- 检查部署环境能否访问学校认证平台和电费门户。
+- 检查 `data/` 对容器非 root 用户是否可写，以及端口是否被其他程序占用。
 
-### 2）收到 ReauthPending 通知（无人值守）
+### 2）收到 ReauthPending 通知
 
-在终端（有 SSH/终端接入的机器）运行：
-
-```bash
-uestc-power-monitor login --force
-```
-
-按提示完成认证：若未配置账号密码会先提示输入（用户名/密码），然后选择 reauth
-方式并完成认证（微信扫码 / 输入验证码；提交前可回答"是否记住该设备"），完成后
-daemon 会在下个轮询周期自动恢复监控，无需重启 daemon。
+默认 Web 模式下，打开页面重新登录即可，认证完成后自动恢复监控。
+关闭 Web 的终端模式请运行 `uestc-power-monitor login --force`。
 
 ### 3）没有收到通知
 
@@ -392,7 +413,8 @@ daemon 会在下个轮询周期自动恢复监控，无需重启 daemon。
 
 ### 5）更换登录方式后无法读取 Cookie
 
-旧明文 Cookie 不再兼容，会被忽略并在下次成功登录后重写为加密格式。若更换了 `cookie_encryption_key`，也需要删除旧 Cookie 文件后重新登录。
+旧明文 Cookie 会迁移为加密格式。若更换了 `cookie_encryption_key` 或丢失自动密钥，
+请恢复原密钥或重新登录生成新会话。
 
 ### 6）日志出现 "electricity service reported a business failure"
 
