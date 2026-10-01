@@ -5,6 +5,7 @@
 target
 
 config.toml
+config/
 .env
 .env.*
 *.db

@@ -1,12 +1,14 @@
 use config::{Config, ConfigError, Environment, File, FileFormat};
 use serde::Deserialize;
+use serde::Serialize;
 use serde::de::{self, SeqAccess, Unexpected, Visitor};
+use serde::ser::Serializer;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::io::{self, Write};
-use std::{fs, path::Path};
+use std::{fs, path::Path, path::PathBuf};
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LoginType {
     #[default]
@@ -30,7 +32,7 @@ fn default_cookie_file() -> String {
 }
 
 /// Web 登录页默认只监听本机；容器通过环境变量覆盖监听地址。
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct WebConfig {
     pub enabled: bool,
@@ -49,7 +51,7 @@ impl Default for WebConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
     pub username: Option<String>,
     pub password: Option<String>,
@@ -110,6 +112,15 @@ impl HeartbeatHours {
 
     pub fn contains(&self, hour: u32) -> bool {
         self.0.contains(&hour)
+    }
+}
+
+impl Serialize for HeartbeatHours {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_seq(self.0.iter())
     }
 }
 
@@ -313,7 +324,7 @@ fn default_smtp_encryption() -> SmtpEncryption {
     SmtpEncryption::Starttls
 }
 
-#[derive(Debug, Deserialize, Clone, Default, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum SmtpEncryption {
     #[default]
@@ -322,7 +333,7 @@ pub enum SmtpEncryption {
     None, // Deprecated/insecure; parsed for compatibility but rejected at runtime
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct NotifyConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -481,7 +492,7 @@ impl Default for NotifyConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Default, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum NotifyType {
     #[default]
@@ -508,6 +519,20 @@ impl NotifyConfig {
             }
         }
         unique
+    }
+}
+
+impl NotifyType {
+    /// 与 serde 的 lowercase 命名一致的通道名，用于 API 回包与日志。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NotifyType::Console => "console",
+            NotifyType::Webhook => "webhook",
+            NotifyType::Telegram => "telegram",
+            NotifyType::Pushover => "pushover",
+            NotifyType::Ntfy => "ntfy",
+            NotifyType::Email => "email",
+        }
     }
 }
 
@@ -555,15 +580,50 @@ fn prompt_line(prompt: &str) -> Result<String, String> {
     Ok(line.trim().to_string())
 }
 
+enum ConfigFileSource {
+    /// 按扩展名搜索工作目录下的 `config.*`。
+    Default,
+    /// 显式配置文件路径。
+    Path(PathBuf),
+    /// 直接内联 TOML 内容（用于写盘前校验）。
+    Inline(String),
+}
+
 impl AppConfig {
     pub fn new() -> Result<Self, ConfigError> {
+        Self::from_source(ConfigFileSource::Default)
+    }
+
+    /// 以显式 TOML 内容替代配置文件构建配置（环境变量与 Docker Secrets 仍然生效），
+    /// 供 Web 配置管理在写盘前校验合并结果。
+    pub(crate) fn from_config_toml_str(content: &str) -> Result<Self, ConfigError> {
+        Self::from_source(ConfigFileSource::Inline(content.to_string()))
+    }
+
+    /// 以显式文件路径（`None` 时退回 `config.*` 扩展名搜索）加载配置，
+    /// 供 Web 运行期重载使用。
+    pub(crate) fn from_config_file(path: Option<&Path>) -> Result<Self, ConfigError> {
+        Self::from_source(match path {
+            Some(path) => ConfigFileSource::Path(path.to_path_buf()),
+            None => ConfigFileSource::Default,
+        })
+    }
+
+    fn from_source(source: ConfigFileSource) -> Result<Self, ConfigError> {
         let mut builder = Config::builder();
+        builder = match source {
+            ConfigFileSource::Default => {
+                // 1. Load from configuration file (if exists)
+                // "config" matches "config.toml", "config.json", etc.
+                builder.add_source(File::with_name("config").required(false))
+            }
+            ConfigFileSource::Path(path) => builder.add_source(File::from(path)),
+            ConfigFileSource::Inline(content) => {
+                builder.add_source(File::from_str(&content, FileFormat::Toml))
+            }
+        };
 
-        // 1. Load from configuration file (if exists)
-        // "config" matches "config.toml", "config.json", etc.
-        builder = builder.add_source(File::with_name("config").required(false));
-
-        // 2. Load from Docker Secrets
+        // Load from Docker Secrets
         // Docker secrets are typically stored in /run/secrets/<secret_name>
         // We read them and add them as a source (overriding config file).
         let secrets = [
@@ -597,7 +657,7 @@ impl AppConfig {
             builder = builder.add_source(File::from_str(&toml_str, FileFormat::Toml));
         }
 
-        // 3. Load from Environment Variables
+        // Load from Environment Variables
         // Prefix "UPM" (Uestc Power Monitor) to avoid collisions.
         // e.g. UPM_USERNAME, UPM_PASSWORD
         // This source is added last, so it overrides Secrets and Config File.
@@ -716,6 +776,17 @@ impl AppConfig {
                 }
                 _ => unreachable!("unexpected missing field: {field}"),
             }
+        }
+        Ok(())
+    }
+
+    /// 运行期更新必须使用有效时区；启动入口保留非法时区告警并回退的兼容行为。
+    pub(crate) fn validate_runtime_update(&self) -> Result<(), ConfigValidationError> {
+        self.validate()?;
+        if self.timezone.trim().parse::<chrono_tz::Tz>().is_err() {
+            return Err(ConfigValidationError::new(vec![
+                "timezone must be a valid IANA timezone name (e.g. Asia/Shanghai)".into(),
+            ]));
         }
         Ok(())
     }
@@ -1040,6 +1111,16 @@ heartbeat_hours = 8
 
         let err = cfg.validate().expect_err("validation should fail");
         assert!(err.to_string().contains("interval_seconds"));
+    }
+
+    #[test]
+    fn runtime_timezone_validation_preserves_startup_fallback_policy() {
+        let mut cfg = valid_app_config();
+        cfg.timezone = "Not/A-Real-Timezone".into();
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.validate_runtime_update().is_err());
+        cfg.timezone = "UTC".into();
+        assert!(cfg.validate_runtime_update().is_ok());
     }
 
     #[test]

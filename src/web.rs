@@ -3,16 +3,17 @@
 use crate::{api::ApiService, config::AppConfig, db::DbService, notify::NotificationManager};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Request, State},
+    extract::{DefaultBodyLimit, Query, Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
-    path::Path,
-    sync::{Arc, Mutex},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 use tokio::sync::{Mutex as AsyncMutex, Notify};
@@ -22,6 +23,11 @@ use uestc_client::{ReauthContext, ReauthMethodKind, UestcClientError};
 #[cfg(test)]
 #[path = "web/tests.rs"]
 mod tests;
+
+#[path = "web/trend.rs"]
+mod trend_data;
+#[cfg(test)]
+use trend_data::build_trend;
 
 #[derive(Clone, Serialize)]
 struct Method {
@@ -70,6 +76,12 @@ struct WebState {
     wake: Notify,
     control: Mutex<Control>,
     auth_error: Mutex<Option<&'static str>>,
+    /// 当前生效的运行时配置；配置管理保存/重载后原子替换，监控循环按轮次读取。
+    config: RwLock<Arc<AppConfig>>,
+    /// 页面可编辑的配置文件（config.toml）；配置来自其他格式时为 None。
+    config_file: Option<PathBuf>,
+    /// 串行化“读文件→写盘→替换运行时配置”，避免并发保存互相覆盖。
+    config_ops: Mutex<()>,
 }
 
 impl WebState {
@@ -99,7 +111,25 @@ impl WebState {
             wake: Notify::new(),
             control: Mutex::new(Control::default()),
             auth_error: Mutex::new(None),
+            config: RwLock::new(Arc::new(config.clone())),
+            config_file: resolve_config_file(),
+            config_ops: Mutex::new(()),
         }))
+    }
+
+    fn config_snapshot(&self) -> Arc<AppConfig> {
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn swap_config(&self, config: AppConfig) {
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .trust_device = config.reauth_trust_device;
+        *self.config.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(config);
     }
 
     fn update(&self, phase: &'static str, message: impl Into<String>) {
@@ -410,10 +440,14 @@ fn router(state: Arc<WebState>) -> Router {
     let protected = Router::new()
         .route("/api/status", get(status))
         .route("/api/history", get(history))
+        .route("/api/trend", get(trend))
         .route("/api/refresh", post(refresh))
         .route("/api/login", post(login))
         .route("/api/reauth", post(reauth))
         .route("/api/cancel", post(cancel))
+        .route("/api/notify/test", post(test_notify))
+        .route("/api/config", get(view_config).post(save_config))
+        .route("/api/config/reload", post(reload_config))
         .route_layer(middleware::from_fn_with_state(state.clone(), access));
     Router::new()
         .route("/", get(|| async { Html(include_str!("web/index.html")) }))
@@ -455,16 +489,23 @@ async fn status(State(state): State<Arc<WebState>>) -> Json<Status> {
 
 async fn history(
     State(state): State<Arc<WebState>>,
+    Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<crate::db::PowerRecord>>, StatusCode> {
+    let limit = query.limit.unwrap_or(10).clamp(1, 1000);
     state
         .db
-        .recent_records(10)
+        .recent_records(limit)
         .await
         .map(Json)
         .map_err(|error| {
             warn!("读取采集历史失败：{error}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    limit: Option<u32>,
 }
 
 async fn refresh(State(state): State<Arc<WebState>>) -> Result<StatusCode, StatusCode> {
@@ -555,6 +596,470 @@ async fn cancel(State(state): State<Arc<WebState>>) -> StatusCode {
         .cancelling = false;
     state.wake.notify_one();
     StatusCode::ACCEPTED
+}
+
+// ============================== 配置管理 ==============================
+
+const SECRET_MASK: &str = "********";
+
+/// 查看时打码、保存时只允许“保持不变 / 覆盖 / 清除”的敏感配置项。
+const SECRET_PATHS: &[&str] = &[
+    "password",
+    "cookie_encryption_key",
+    "web.access_token",
+    "notify.telegram_bot_token",
+    "notify.pushover_api_token",
+    "notify.pushover_user_key",
+    "notify.ntfy_token",
+    "notify.smtp_password",
+];
+
+/// 启动时即绑定到监听器、数据库连接、客户端或密钥的配置项：
+/// 页面保存后写入文件，但要重启进程才生效。
+const RESTART_REQUIRED_PATHS: &[&str] = &[
+    "username",
+    "password",
+    "login_type",
+    "service_url",
+    "database_url",
+    "cookie_file",
+    "cookie_encryption_key",
+    "web.enabled",
+    "web.bind",
+    "web.access_token",
+];
+
+#[derive(Serialize)]
+struct ConfigWarning {
+    path: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct ConfigView {
+    file: Option<String>,
+    editable: bool,
+    config: serde_json::Value,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<ConfigWarning>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    restart: Vec<String>,
+}
+
+fn config_error(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(serde_json::json!({ "message": message.into() })),
+    )
+        .into_response()
+}
+
+fn json_child<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    match path.split_once('.') {
+        Some((head, tail)) => json_child(value.get(head)?, tail),
+        None => value.get(path),
+    }
+}
+
+fn json_child_mut<'a>(
+    value: &'a mut serde_json::Value,
+    path: &str,
+) -> Option<&'a mut serde_json::Value> {
+    match path.split_once('.') {
+        Some((head, tail)) => json_child_mut(value.get_mut(head)?, tail),
+        None => value.get_mut(path),
+    }
+}
+
+/// 查看用的配置快照：敏感字段替换为占位符（未设置显示为 null）。
+fn masked_config(config: &AppConfig) -> serde_json::Value {
+    let mut value = serde_json::to_value(config).expect("AppConfig always serializes");
+    for path in SECRET_PATHS {
+        if let Some(slot) = json_child_mut(&mut value, path) {
+            match slot {
+                serde_json::Value::Null => {}
+                serde_json::Value::String(text) if text.is_empty() => {
+                    *slot = serde_json::Value::Null;
+                }
+                _ => *slot = serde_json::Value::String(SECRET_MASK.into()),
+            }
+        }
+    }
+    value
+}
+
+/// 页面编辑只支持 config.toml：TOML 已存在（或尚无任何配置文件）时返回其路径；
+/// 存在其他格式的 config.* 时返回 None，避免页面修改与真实配置来源分叉。
+fn resolve_config_file() -> Option<PathBuf> {
+    const TOML: &str = "config.toml";
+    if Path::new(TOML).is_file() {
+        return Some(PathBuf::from(TOML));
+    }
+    for extension in ["json", "yaml", "yml", "ini", "ron", "json5"] {
+        if Path::new(&format!("config.{extension}")).is_file() {
+            return None;
+        }
+    }
+    Some(PathBuf::from(TOML))
+}
+
+async fn view_config(State(state): State<Arc<WebState>>) -> Json<ConfigView> {
+    Json(ConfigView {
+        file: state
+            .config_file
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        editable: state.config_file.is_some(),
+        config: masked_config(&state.config_snapshot()),
+        warnings: Vec::new(),
+        restart: Vec::new(),
+    })
+}
+
+async fn save_config(
+    State(state): State<Arc<WebState>>,
+    Json(patch): Json<serde_json::Value>,
+) -> Result<Json<ConfigView>, Response> {
+    let file = state.config_file.clone().ok_or_else(|| {
+        config_error(
+            StatusCode::CONFLICT,
+            "未找到可编辑的 config.toml（配置可能来自其他格式或环境变量），请在程序工作目录准备 config.toml 后重试。",
+        )
+    })?;
+    // 以下全程同步（文件读写与配置替换之间没有 await），锁不会跨挂起点持有。
+    let _guard = state.config_ops.lock().unwrap_or_else(|e| e.into_inner());
+
+    let existing = match std::fs::read_to_string(&file) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(config_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("读取配置文件失败：{error}"),
+            ));
+        }
+    };
+    let mut document: toml_edit::DocumentMut = existing.parse().map_err(|_| {
+        config_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "配置文件不是有效的 TOML，请先手工修复。为保护敏感项，不回传配置源码。",
+        )
+    })?;
+    let changes = apply_config_patch(document.as_table_mut(), &patch)
+        .map_err(|message| config_error(StatusCode::BAD_REQUEST, message))?;
+    if changes.is_empty() {
+        return Err(config_error(
+            StatusCode::BAD_REQUEST,
+            "没有检测到任何修改。",
+        ));
+    }
+    let toml_text = document.to_string();
+    let mut config = AppConfig::from_config_toml_str(&toml_text).map_err(|_| {
+        config_error(
+            StatusCode::BAD_REQUEST,
+            "配置校验失败：配置格式或字段类型不正确，请检查修改项。",
+        )
+    })?;
+    if let Err(error) = config.validate_runtime_update() {
+        return Err(config_error(
+            StatusCode::BAD_REQUEST,
+            format!("配置校验失败：{error}"),
+        ));
+    }
+    prepare_cookie_key(&mut config).map_err(|error| {
+        config_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("解析 Cookie 加密密钥失败：{error}"),
+        )
+    })?;
+    write_config_file(&file, &toml_text).map_err(|error| {
+        config_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("写入配置文件失败：{error}"),
+        )
+    })?;
+    apply_runtime_config(&state, config);
+
+    let snapshot = state.config_snapshot();
+    let warnings = config_warnings(&changes, &snapshot);
+    let restart = restart_required_paths(&changes);
+    info!("配置已通过 Web 页面修改并写入 {}", file.display());
+    Ok(Json(ConfigView {
+        file: Some(file.display().to_string()),
+        editable: true,
+        config: masked_config(&snapshot),
+        warnings,
+        restart,
+    }))
+}
+
+async fn reload_config(State(state): State<Arc<WebState>>) -> Result<Json<ConfigView>, Response> {
+    let _guard = state.config_ops.lock().unwrap_or_else(|e| e.into_inner());
+    let mut config = AppConfig::from_config_file(state.config_file.as_deref()).map_err(|_| {
+        config_error(
+            StatusCode::BAD_REQUEST,
+            "从磁盘加载配置失败：请检查文件是否可读、配置格式及字段类型。",
+        )
+    })?;
+    if let Err(error) = config.validate_runtime_update() {
+        return Err(config_error(
+            StatusCode::BAD_REQUEST,
+            format!("配置校验失败（请先修正配置文件）：{error}"),
+        ));
+    }
+    prepare_cookie_key(&mut config).map_err(|error| {
+        config_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("解析 Cookie 加密密钥失败：{error}"),
+        )
+    })?;
+    apply_runtime_config(&state, config);
+    info!("已从配置文件重载运行时配置");
+    Ok(Json(ConfigView {
+        file: state
+            .config_file
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        editable: state.config_file.is_some(),
+        config: masked_config(&state.config_snapshot()),
+        warnings: Vec::new(),
+        restart: Vec::new(),
+    }))
+}
+
+/// 替换运行时配置并应用可即时生效的部分：时区与二次认证默认勾选。
+/// 唤醒监控循环：下一轮读取新快照，按需重建通知管理器并使用新的采集间隔，
+/// 避免保存后要等满当前 interval 才生效。
+fn apply_runtime_config(state: &WebState, config: AppConfig) {
+    if let Err(error) = crate::time::set_timezone(&config.timezone) {
+        warn!(
+            "应用新时区失败：{error}（保持 {}）",
+            crate::time::current_timezone_name()
+        );
+    }
+    state.swap_config(config);
+    state.wake.notify_one();
+}
+
+type ConfigChanges = Vec<(String, serde_json::Value)>;
+
+/// 将 JSON 补丁写入 TOML 表：嵌套对象进入子表；null 删除键；
+/// 其余标量/数组按值写入。返回“路径 + 写入值”用于保存后的生效性核对。
+fn apply_config_patch(
+    table: &mut toml_edit::Table,
+    patch: &serde_json::Value,
+) -> Result<ConfigChanges, String> {
+    fn walk(
+        table: &mut toml_edit::Table,
+        prefix: &str,
+        patch: &serde_json::Value,
+        changes: &mut ConfigChanges,
+    ) -> Result<(), String> {
+        let Some(fields) = patch.as_object() else {
+            return Err("配置修改必须是 JSON 对象。".into());
+        };
+        for (key, value) in fields {
+            if key.is_empty()
+                || !key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(format!("非法的配置项名称：{key:?}"));
+            }
+            let path = if prefix.is_empty() {
+                key.to_string()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            if value.as_object().is_some_and(|object| !object.is_empty()) {
+                let child = table
+                    .entry(key)
+                    .or_insert(toml_edit::table())
+                    .as_table_mut()
+                    .ok_or_else(|| format!("配置项 {path} 已存在且不是配置表，无法写入其子项。"))?;
+                walk(child, &path, value, changes)?;
+            } else if value.is_null() {
+                table.remove(key);
+                changes.push((path, serde_json::Value::Null));
+            } else {
+                let mut new_value = json_to_toml_value(value)?;
+                // 原位替换并继承旧值的 decor（键上的前导注释与等号空白由键本身保留），
+                // 否则 Table::insert 重建键会丢掉被改写行的注释。
+                if let Some(toml_edit::Item::Value(existing)) = table.get(key) {
+                    *new_value.decor_mut() = existing.decor().clone();
+                }
+                match table.get_mut(key) {
+                    Some(existing) => *existing = toml_edit::Item::Value(new_value),
+                    None => {
+                        table.insert(key, toml_edit::Item::Value(new_value));
+                    }
+                }
+                // heartbeat_hours 是正式键名；与别名 heartbeat_hour 并存会让 serde 报重复字段。
+                if path == "notify.heartbeat_hours" {
+                    table.remove("heartbeat_hour");
+                }
+                changes.push((path, value.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    let mut changes = ConfigChanges::new();
+    walk(table, "", patch, &mut changes)?;
+    Ok(changes)
+}
+
+fn json_to_toml_value(value: &serde_json::Value) -> Result<toml_edit::Value, String> {
+    Ok(match value {
+        serde_json::Value::Bool(flag) => (*flag).into(),
+        serde_json::Value::Number(number) => match (number.as_i64(), number.as_f64()) {
+            (Some(int), _) => int.into(),
+            (None, Some(float)) if float.is_finite() => float.into(),
+            _ => return Err("数字超出可表示范围。".into()),
+        },
+        serde_json::Value::String(text) => text.as_str().into(),
+        serde_json::Value::Array(items) => {
+            let mut array = toml_edit::Array::new();
+            for item in items {
+                array.push(json_to_toml_value(item)?);
+            }
+            array.into()
+        }
+        serde_json::Value::Object(fields) => {
+            let mut inline = toml_edit::InlineTable::new();
+            for (key, item) in fields {
+                inline.insert(key.as_str(), json_to_toml_value(item)?);
+            }
+            inline.into()
+        }
+        serde_json::Value::Null => return Err("null 仅用于清除配置项。".into()),
+    })
+}
+
+/// 保存后核对：逐项比较“写入文件的值”与“重载后的生效值”。需重启生效的
+/// 配置项不参与核对（其生效值由启动时决定，且其中 cookie 密钥会被解析改写）。
+/// 不一致通常意味着该配置项被环境变量（UPM_*）或 Docker Secrets 覆盖。
+fn config_warnings(changes: &ConfigChanges, config: &AppConfig) -> Vec<ConfigWarning> {
+    let effective = serde_json::to_value(config).expect("AppConfig always serializes");
+    changes
+        .iter()
+        .filter(|(path, _)| !RESTART_REQUIRED_PATHS.contains(&path.as_str()))
+        .filter_map(|(path, written)| {
+            if json_effective_eq(written, json_child(&effective, path)) {
+                None
+            } else {
+                Some(ConfigWarning {
+                    path: path.clone(),
+                    message: "重载后的生效值与写入值不一致，通常是被环境变量（UPM_*）或 Docker Secrets 覆盖，或该配置项不存在。".into(),
+                })
+            }
+        })
+        .collect()
+}
+
+/// null 写入允许键消失或变为空字符串；数字在整型/浮点之间视为相等。
+fn json_effective_eq(written: &serde_json::Value, applied: Option<&serde_json::Value>) -> bool {
+    match (written, applied) {
+        (serde_json::Value::Null, None) => true,
+        (serde_json::Value::Null, Some(serde_json::Value::Null)) => true,
+        (serde_json::Value::Null, Some(serde_json::Value::String(text))) => text.is_empty(),
+        (written, Some(applied)) => json_loose_eq(written, applied),
+        _ => false,
+    }
+}
+
+fn json_loose_eq(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    match (left, right) {
+        (serde_json::Value::Number(left), serde_json::Value::Number(right)) => {
+            left.as_f64() == right.as_f64()
+        }
+        (serde_json::Value::Array(left), serde_json::Value::Array(right)) => {
+            left.len() == right.len() && left.iter().zip(right).all(|(l, r)| json_loose_eq(l, r))
+        }
+        (left, right) => left == right,
+    }
+}
+
+fn restart_required_paths(changes: &ConfigChanges) -> Vec<String> {
+    changes
+        .iter()
+        .map(|(path, _)| path.clone())
+        .filter(|path| RESTART_REQUIRED_PATHS.contains(&path.as_str()))
+        .collect()
+}
+
+/// 原子写盘：临时文件 + rename，保留原文件权限（新文件 0600，配置可能含密钥）。
+fn write_config_file(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let temporary = path.with_extension(format!("toml.{}.tmp", random_secret()?));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mode = std::fs::metadata(path)
+                .map(|metadata| metadata.permissions().mode() & 0o777)
+                .unwrap_or(0o600);
+            options.mode(mode);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temporary); // 成功 rename 后为空操作
+    result
+}
+
+// ============================== 用电趋势 ==============================
+
+async fn trend(State(state): State<Arc<WebState>>) -> Result<Json<trend_data::Trend>, StatusCode> {
+    let tz = crate::time::current_timezone();
+    let today = chrono::Utc::now().with_timezone(&tz).date_naive();
+    let since = trend_data::window_start(tz, today)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+        .to_rfc3339();
+    let mut builder =
+        trend_data::TrendBuilder::new(tz, today).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let records = state.db.trend_records(&since);
+    tokio::pin!(records);
+    while let Some(record) = records.try_next().await.map_err(|error| {
+        warn!("读取用电趋势失败：{error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })? {
+        builder.push(&record);
+    }
+    Ok(Json(builder.finish()))
+}
+
+// ============================== 测试通知 ==============================
+
+#[derive(Serialize)]
+struct NotifyTestView {
+    results: Vec<crate::notify::ChannelTestResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<&'static str>,
+}
+
+async fn test_notify(State(state): State<Arc<WebState>>) -> Json<NotifyTestView> {
+    let config = state.config_snapshot();
+    if !config.notify.enabled {
+        return Json(NotifyTestView {
+            results: vec![],
+            message: Some("通知未启用。请先在配置中启用通知并保存，再进行测试。"),
+        });
+    }
+    let results = NotificationManager::send_test_message(
+        &config.notify,
+        "这是一条来自 Web 页面的测试通知。收到它说明该通道配置可用。",
+    )
+    .await;
+    Json(NotifyTestView {
+        results,
+        message: None,
+    })
 }
 
 /// Resolve the existing independent key before deriving from credentials. This lets
@@ -706,10 +1211,18 @@ async fn shutdown() {
 
 async fn monitor(state: Arc<WebState>, db: DbService, config: AppConfig) {
     let mut notifications = NotificationManager::new(config.notify.clone());
-    let interval = Duration::from_secs(config.interval_seconds);
+    let mut notify_config = config.notify.clone();
     let mut waiting = true;
     let mut previously_monitoring = false;
     loop {
+        // 配置管理保存/重载后在此跟随：通知配置变更时重建管理器，间隔下轮生效。
+        let config = state.config_snapshot();
+        if config.notify != notify_config {
+            notify_config = config.notify.clone();
+            notifications = NotificationManager::new(config.notify.clone());
+            info!("通知配置已变更，通知管理器已按新配置重建");
+        }
+        let interval = Duration::from_secs(config.interval_seconds);
         let error = state
             .auth_error
             .lock()

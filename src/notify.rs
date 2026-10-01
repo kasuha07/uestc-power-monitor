@@ -64,6 +64,16 @@ struct DeliveryReport {
     failed: usize,
 }
 
+/// 单个通知通道的连通性测试结果（供 Web 测试通知接口序列化）。
+#[derive(Debug, serde::Serialize)]
+pub struct ChannelTestResult {
+    pub channel: &'static str,
+    pub ok: bool,
+    /// 失败原因类别：`not_configured`（缺少配置或配置无效）、`send_failed`
+    /// （发送失败或超时）；成功时为空。失败细节只写服务端日志。
+    pub reason: &'static str,
+}
+
 impl DeliveryReport {
     fn has_success(self) -> bool {
         self.succeeded > 0
@@ -108,6 +118,58 @@ impl NotificationManager {
             last_reauth_pending_notify_time: None,
             startup_notified: false,
         })
+    }
+
+    /// 并发向 `config` 声明的所有活动通道发送测试消息，逐通道回报结果。
+    /// 每通道只尝试一次（不做重试退避），单通道受 `request_timeout_seconds` 限时；
+    /// 未配置完整（如缺少 URL/凭据）的通道回报 `not_configured`。
+    /// 失败细节可能包含上游 URL 与凭据，只记服务端日志，不进入回包。
+    pub async fn send_test_message(config: &NotifyConfig, message: &str) -> Vec<ChannelTestResult> {
+        if !config.enabled {
+            return Vec::new();
+        }
+        let mut handles = Vec::new();
+        for notify_type in config.get_active_notify_types() {
+            let channel = notify_type.as_str();
+            let Some(notifier) = create_single_notifier(config, notify_type) else {
+                handles.push((channel, None));
+                continue;
+            };
+            let message = message.to_string();
+            let timeout_secs = config.request_timeout_seconds.max(1);
+            handles.push((
+                channel,
+                Some(tokio::spawn(async move {
+                    // 在任务内把结果压平成 Send 的 bool：notifier 的错误类型未实现 Send。
+                    timeout(
+                        Duration::from_secs(timeout_secs),
+                        notifier.notify_test(&message),
+                    )
+                    .await
+                    .map(|send| send.is_ok())
+                })),
+            ));
+        }
+
+        let mut results = Vec::new();
+        for (channel, handle) in handles {
+            let (ok, reason) = match handle {
+                None => (false, "not_configured"),
+                Some(handle) => match handle.await {
+                    Ok(Ok(true)) => (true, ""),
+                    _ => {
+                        warn!("通知通道 {channel} 测试失败（详情已脱敏）");
+                        (false, "send_failed")
+                    }
+                },
+            };
+            results.push(ChannelTestResult {
+                channel,
+                ok,
+                reason,
+            });
+        }
+        results
     }
 
     fn retry_attempts(&self) -> usize {
@@ -558,6 +620,13 @@ pub trait Notifier: Send + Sync {
         error_msg: &'a str,
         event: NotificationEvent,
     ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>>;
+
+    /// 通道连通性测试：发送一条明确的测试消息。实现必须复用该通道的常规
+    /// 发送路径（同样的目标与凭据），但不做重试退避——由调用方统一限时。
+    fn notify_test<'a>(
+        &'a self,
+        message: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>>;
 }
 
 pub fn create_single_notifier(
@@ -905,6 +974,16 @@ impl Notifier for ConsoleNotifier {
             Ok(())
         })
     }
+
+    fn notify_test<'a>(
+        &'a self,
+        message: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            info!("UESTC Power Monitor 🧪 [Test] {}", message);
+            Ok(())
+        })
+    }
 }
 
 pub struct WebhookNotifier {
@@ -915,6 +994,23 @@ pub struct WebhookNotifier {
 impl WebhookNotifier {
     pub fn new(url: String, client: reqwest::Client) -> Self {
         Self { client, url }
+    }
+
+    async fn send_payload(
+        &self,
+        event: &str,
+        payload: &(impl serde::Serialize + Sync),
+    ) -> Result<(), Box<dyn Error>> {
+        debug!("Sending webhook notification: event={event}");
+        self.client
+            .post(&self.url)
+            .header("X-Event-Type", event)
+            .json(payload)
+            .send()
+            .await?
+            .error_for_status()?;
+        debug!("Webhook notification sent successfully");
+        Ok(())
     }
 }
 
@@ -941,16 +1037,7 @@ impl Notifier for WebhookNotifier {
                     return Ok(()); // These events use notify_error instead
                 }
             };
-            debug!("Sending webhook notification: event={}", event_str);
-            self.client
-                .post(&self.url)
-                .header("X-Event-Type", event_str)
-                .json(info)
-                .send()
-                .await?
-                .error_for_status()?;
-            debug!("Webhook notification sent successfully");
-            Ok(())
+            self.send_payload(event_str, info).await
         })
     }
 
@@ -980,16 +1067,22 @@ impl Notifier for WebhookNotifier {
                 "timestamp": time::now_rfc3339(),
             });
 
-            debug!("Sending webhook error notification: event={}", event_str);
-            self.client
-                .post(&self.url)
-                .header("X-Event-Type", event_str)
-                .json(&payload)
-                .send()
-                .await?
-                .error_for_status()?;
-            debug!("Webhook error notification sent successfully");
-            Ok(())
+            self.send_payload(event_str, &payload).await
+        })
+    }
+
+    fn notify_test<'a>(
+        &'a self,
+        message: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            let payload = serde_json::json!({
+                "title": "UESTC Power Monitor",
+                "event": "test",
+                "message": message,
+                "timestamp": time::now_rfc3339(),
+            });
+            self.send_payload("test", &payload).await
         })
     }
 }
@@ -1007,6 +1100,20 @@ impl TelegramNotifier {
             bot_token,
             chat_id,
         }
+    }
+
+    async fn send_message(&self, message: &str) -> Result<(), Box<dyn Error>> {
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
+        debug!("Sending Telegram notification");
+        let params = [("chat_id", self.chat_id.as_str()), ("text", message)];
+        self.client
+            .post(&url)
+            .form(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+        debug!("Telegram notification sent successfully");
+        Ok(())
     }
 }
 
@@ -1039,18 +1146,7 @@ impl Notifier for TelegramNotifier {
                 title, info.room_display_name, info.remaining_money, info.remaining_energy
             );
 
-            let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
-            debug!("Sending Telegram notification");
-            let params = [("chat_id", &self.chat_id), ("text", &message)];
-
-            self.client
-                .post(&url)
-                .form(&params)
-                .send()
-                .await?
-                .error_for_status()?;
-            debug!("Telegram notification sent successfully");
-            Ok(())
+            self.send_message(&message).await
         })
     }
 
@@ -1075,18 +1171,17 @@ impl Notifier for TelegramNotifier {
 
             let message = format!("UESTC Power Monitor\n{}\n{}", title, error_msg);
 
-            let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
-            debug!("Sending Telegram error notification");
-            let params = [("chat_id", &self.chat_id), ("text", &message)];
+            self.send_message(&message).await
+        })
+    }
 
-            self.client
-                .post(&url)
-                .form(&params)
-                .send()
-                .await?
-                .error_for_status()?;
-            debug!("Telegram error notification sent successfully");
-            Ok(())
+    fn notify_test<'a>(
+        &'a self,
+        message: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            let text = format!("UESTC Power Monitor\n🧪 [Test]\n{}", message);
+            self.send_message(&text).await
         })
     }
 }
@@ -1298,6 +1393,21 @@ impl Notifier for PushoverNotifier {
             Ok(())
         })
     }
+
+    fn notify_test<'a>(
+        &'a self,
+        message: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            self.send_message(
+                message,
+                Some("🧪 UESTC Power Monitor - Test"),
+                self.default_priority,
+                self.default_url.as_deref(),
+            )
+            .await
+        })
+    }
 }
 
 pub struct NtfyNotifier {
@@ -1479,6 +1589,25 @@ impl Notifier for NtfyNotifier {
             )
             .await?;
             Ok(())
+        })
+    }
+
+    fn notify_test<'a>(
+        &'a self,
+        message: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            self.send_message(
+                message,
+                Some("🧪 UESTC Power Monitor - Test"),
+                self.default_priority,
+                Some(&self.default_tags),
+                self.click_action.as_deref(),
+                self.icon.as_deref(),
+                Some(&self.actions),
+                self.use_markdown,
+            )
+            .await
         })
     }
 }
@@ -1745,6 +1874,23 @@ impl Notifier for EmailNotifier {
             Ok(())
         })
     }
+
+    fn notify_test<'a>(
+        &'a self,
+        message: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+        Box::pin(async move {
+            self.send_email(
+                "🧪 UESTC Power Monitor - Test",
+                &format!(
+                    "UESTC Power Monitor - Test\n\n{}\n\nTime: {}",
+                    message,
+                    time::now_display()
+                ),
+            )
+            .await
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1779,6 +1925,70 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn webhook_delivers_all_message_types_and_reports_http_failures() {
+        use axum::{Json, Router, extract::State, http::HeaderMap, routing::post};
+        let (sender, mut received) = tokio::sync::mpsc::channel(4);
+        let app = Router::new()
+            .route(
+                "/notify",
+                post(
+                    |State(sender): State<
+                        tokio::sync::mpsc::Sender<(String, serde_json::Value)>,
+                    >,
+                     headers: HeaderMap,
+                     Json(payload): Json<serde_json::Value>| async move {
+                        let event = headers["X-Event-Type"].to_str().unwrap().to_owned();
+                        let failed = payload["message"] == "simulate-upstream-failure";
+                        sender.send((event, payload)).await.unwrap();
+                        if failed {
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            axum::http::StatusCode::OK
+                        }
+                    },
+                ),
+            )
+            .with_state(sender);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let notifier = WebhookNotifier::new(
+            format!("http://{address}/notify"),
+            reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+        );
+        notifier
+            .notify(&sample_power_info(5.0), NotificationEvent::LowBalance)
+            .await
+            .unwrap();
+        notifier
+            .notify_error("fake-error", NotificationEvent::LoginFailure)
+            .await
+            .unwrap();
+        notifier.notify_test("fake-test").await.unwrap();
+        assert!(
+            notifier
+                .notify_test("simulate-upstream-failure")
+                .await
+                .is_err()
+        );
+
+        let (event, payload) = received.recv().await.unwrap();
+        assert_eq!(event, "low_balance");
+        assert_eq!(payload["syje"], 5.0);
+        let (event, payload) = received.recv().await.unwrap();
+        assert_eq!(event, "login_failure");
+        assert_eq!(payload["error"], "fake-error");
+        let (event, payload) = received.recv().await.unwrap();
+        assert_eq!(event, "test");
+        assert_eq!(payload["message"], "fake-test");
+        server.abort();
+    }
+
     struct StaticNotifier {
         succeeds: bool,
     }
@@ -1806,6 +2016,19 @@ mod tests {
             &'a self,
             _error_msg: &'a str,
             _event: NotificationEvent,
+        ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
+            Box::pin(async move {
+                if self.succeeds {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("simulated notifier failure").into())
+                }
+            })
+        }
+
+        fn notify_test<'a>(
+            &'a self,
+            _message: &'a str,
         ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send + 'a>> {
             Box::pin(async move {
                 if self.succeeds {
@@ -2120,5 +2343,39 @@ mod tests {
     fn pinned_dns_validation_rejects_private_ip() {
         let result = validate_https_public_url_with_pinned_dns("https://127.0.0.1/hook", "webhook");
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn send_test_message_reports_console_success() {
+        let mut config = base_notify_config();
+        config.notify_types = vec![NotifyType::Console];
+        let results = NotificationManager::send_test_message(&config, "test").await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ok);
+        assert_eq!(results[0].channel, "console");
+        assert_eq!(results[0].reason, "");
+    }
+
+    #[tokio::test]
+    async fn send_test_message_flags_channel_missing_configuration() {
+        // 选择 webhook 但未配置 URL：构造器跳过，应回报 not_configured 而不是静默成功。
+        let mut config = base_notify_config();
+        config.notify_types = vec![NotifyType::Webhook];
+        let results = NotificationManager::send_test_message(&config, "test").await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].ok);
+        assert_eq!(results[0].channel, "webhook");
+        assert_eq!(results[0].reason, "not_configured");
+    }
+
+    #[tokio::test]
+    async fn send_test_message_skips_disabled_notifications() {
+        let mut config = base_notify_config();
+        config.enabled = false;
+        assert!(
+            NotificationManager::send_test_message(&config, "test")
+                .await
+                .is_empty()
+        );
     }
 }

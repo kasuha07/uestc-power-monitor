@@ -9,22 +9,24 @@ services:
     restart: unless-stopped
     # 已有数据可在 .env 设置 UPM_UID/UPM_GID，使运行用户与 data/ 属主一致。
     user: "${UPM_UID:-65532}:${UPM_GID:-65532}"
+    # 工作目录中的 config.toml 位于可写目录挂载内，支持原子替换。
+    working_dir: /app/config
 
     # 默认只开放到宿主机本地。远程访问可用 SSH 转发，或在 HTTPS 反代后开放。
     ports:
       - "127.0.0.1:8080:8080"
 
     volumes:
-      # 本地配置文件（建议先 cp config.toml.example config.toml）
-      - ./config.toml:/app/config.toml:ro
+      # 必须挂载目录；单文件挂载即使 rw 也无法原子替换挂载点。
+      - ./config:/app/config
       # SQLite 数据库和 Cookie 持久化目录
       - ./data:/app/data
 
     environment:
       TZ: Asia/Shanghai
       UPM_TIMEZONE: Asia/Shanghai
-      UPM_DATABASE_URL: sqlite://data/power_monitor.db
-      UPM_COOKIE_FILE: data/uestc_cookies.json
+      UPM_DATABASE_URL: sqlite:///app/data/power_monitor.db
+      UPM_COOKIE_FILE: /app/data/uestc_cookies.json
       UPM_WEB__BIND: "0.0.0.0:8080"
 
       # 页面访问密钥默认自动生成并保存在 data/web-access-token。

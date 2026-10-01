@@ -1,5 +1,6 @@
 use crate::api::PowerInfo;
 use crate::time;
+use futures_util::{Stream, StreamExt};
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Pool, Sqlite};
 use std::path::Path;
@@ -81,6 +82,14 @@ impl DbService {
         .execute(&self.pool)
         .await?;
 
+        // RFC3339 offsets can change after a timezone reload; index actual instants.
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS power_records_sampled_at \
+             ON power_records (julianday(created_at), id)",
+        )
+        .execute(&self.pool)
+        .await?;
+
         debug!("Database initialization completed");
         Ok(())
     }
@@ -136,12 +145,46 @@ impl DbService {
             )
             .collect())
     }
+
+    /// 流式读取完整趋势窗口及窗口前最后一条基线，不按采样条数截断。
+    /// 按实际时刻排序，兼容历史数据含不同时区偏移；调用方逐条聚合以限制内存。
+    pub fn trend_records(
+        &self,
+        since: &str,
+    ) -> impl Stream<Item = Result<PowerRecord, sqlx::Error>> + '_ {
+        sqlx::query_as::<_, (f64, f64, String, String)>(
+            "WITH baseline AS ( \
+                SELECT id, remaining_money, remaining_energy, room_display_name, created_at \
+                FROM power_records WHERE julianday(created_at) < julianday(?1) \
+                ORDER BY julianday(created_at) DESC, id DESC LIMIT 1 \
+             ), samples AS ( \
+                SELECT * FROM baseline UNION ALL \
+                SELECT id, remaining_money, remaining_energy, room_display_name, created_at \
+                FROM power_records WHERE julianday(created_at) >= julianday(?1) \
+             ) \
+             SELECT remaining_money, remaining_energy, room_display_name, created_at \
+             FROM samples ORDER BY julianday(created_at), id",
+        )
+        .bind(since.to_owned())
+        .fetch(&self.pool)
+        .map(|row| {
+            row.map(
+                |(remaining_money, remaining_energy, room_display_name, created_at)| PowerRecord {
+                    remaining_money,
+                    remaining_energy,
+                    room_display_name,
+                    created_at,
+                },
+            )
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::DateTime;
+    use futures_util::TryStreamExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_power_info() -> PowerInfo {
@@ -157,6 +200,42 @@ mod tests {
             campus_id: "campus-id".to_string(),
             room_number: "407".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn trend_records_order_instants_and_include_only_the_latest_baseline() {
+        let service = DbService::new("sqlite::memory:".into()).await.unwrap();
+        service.init().await.unwrap();
+        for (at, money) in [
+            ("2026-09-20T20:00:00+08:00", 20.0),
+            ("2026-09-20T13:00:00+00:00", 18.0),
+            ("2026-09-20T22:00:00+08:00", 16.0),
+            ("2026-09-20T11:00:00+00:00", 22.0),
+        ] {
+            sqlx::query(
+                "INSERT INTO power_records (remaining_energy, remaining_money, meter_room_id, \
+                    room_display_name, room_id, building_id, campus_id, room_number, created_at) \
+                 VALUES (10, ?, 'm', 'room', 'r', 'b', 'c', '1', ?)",
+            )
+            .bind(money)
+            .bind(at)
+            .execute(&service.pool)
+            .await
+            .unwrap();
+        }
+        let records: Vec<_> = service
+            .trend_records("2026-09-20T12:30:00+00:00")
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.remaining_money)
+                .collect::<Vec<_>>(),
+            vec![20.0, 18.0, 16.0]
+        );
+        service.pool.close().await;
     }
 
     #[tokio::test]

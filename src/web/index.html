@@ -23,6 +23,13 @@
       <div class="card reading"><span>剩余电量</span><p><strong id="energy">—</strong> kWh</p></div>
       <p id="reading-meta" class="hint"></p>
     </section>
+    <section id="trend-panel" class="card trend-card" hidden aria-label="用电趋势">
+      <div class="trend-heading"><h2>用电趋势</h2><span id="trend-estimate" class="trend-estimate" hidden></span></div>
+      <p id="trend-summary" class="hint"></p>
+      <div id="trend-legend" class="trend-legend" hidden><span><i class="trend-dot trend-dot-money"></i>余额（元）</span><span><i class="trend-dot trend-dot-energy"></i>剩余电量（kWh）</span></div>
+      <div id="trend-chart"></div>
+      <p class="hint">最近 30 天，每天取当日最后一次采集的读数。悬浮数据点可查看当日数值。</p>
+    </section>
     <section class="card history-card" aria-labelledby="history-title">
       <h2 id="history-title">最近采集记录</h2>
       <p class="hint">最近 10 次成功采集，按时间从新到旧排列。时间按浏览器所在时区显示。</p>
@@ -54,6 +61,22 @@
       <p class="hint">账号密码只用于本次认证，不保存到配置文件。登录会话加密保存在数据目录中。</p>
     </section>
     <button id="cancel" class="secondary" type="button" hidden>取消本次认证</button>
+    <details id="config-card" class="card config-card">
+      <summary>配置管理</summary>
+      <p id="config-meta" class="hint">正在读取配置…</p>
+      <form id="config-form"></form>
+      <p id="config-message" class="hint" role="status"></p>
+      <div class="notify-test-row">
+        <button id="notify-test" type="button" class="secondary">发送测试通知</button>
+        <span id="notify-test-result" class="hint" role="status"></span>
+      </div>
+      <p class="hint">测试会按当前已保存的生效配置，向每个启用的通知通道各发送一条测试消息，用于确认通道可用。</p>
+      <div class="config-actions">
+        <button id="config-save" type="submit" form="config-form">保存修改</button>
+        <button id="config-reload" type="button" class="secondary">重载配置</button>
+      </div>
+      <p class="hint">保存会写入配置文件并立即重新加载；标注“重启生效”的配置项需重启程序。环境变量（UPM_*）与 Docker Secrets 优先于配置文件中的同名配置。</p>
+    </details>
     <footer><span>服务保持运行 · 登录后自动恢复监控</span><button id="disconnect" class="text-button" type="button">断开页面连接</button></footer>
   </div>
   <p id="error" role="alert" hidden></p>
