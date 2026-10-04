@@ -2,84 +2,309 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>宿舍电费 · UESTC Power Monitor</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
 <main>
-  <header><span class="logo" aria-hidden="true">ϟ</span><div><p class="eyebrow">UESTC POWER MONITOR</p><h1>宿舍电费</h1></div><span id="badge" class="badge">未连接</span></header>
-  <p class="intro">登录一次，持续关注电费。会话过期后，在这里重新认证即可。</p>
-  <section id="access-panel" class="card">
-    <p class="eyebrow">连接监控</p><h2>输入访问密钥</h2>
-    <p class="hint">首次启动时，访问密钥会显示在程序日志中。它用于保护这个管理页面。</p>
-    <form id="access-form"><label for="token">访问密钥</label><input id="token" type="password" autocomplete="off" required minlength="32"><button type="submit">连接</button></form>
+  <header>
+    <div class="logo-group">
+      <span class="logo" aria-hidden="true">
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+        </svg>
+      </span>
+      <div class="header-titles">
+        <p class="eyebrow">UESTC POWER MONITOR</p>
+        <h1>宿舍电费</h1>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="切换界面主题" title="主题模式：跟随系统">
+        <svg class="theme-icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="theme-icon icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+        <svg class="theme-icon icon-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>
+      </button>
+      <span id="badge" class="badge">未连接</span>
+    </div>
+  </header>
+  <p class="intro">统一身份认证接入 · 实时用电监测 · 智能趋势分析 · 余额多渠道告警</p>
+
+  <section id="access-panel" class="card access-card">
+    <div class="card-header-row">
+      <div class="card-icon-badge">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      </div>
+      <div>
+        <p class="eyebrow">连接监控</p>
+        <h2>输入访问密钥</h2>
+      </div>
+    </div>
+    <p class="hint">首次启动时，访问密钥会显示在程序控制台日志中（<code>UPM_WEB_ACCESS_TOKEN</code>），用于保护此管理面板。</p>
+    <form id="access-form">
+      <label for="token">访问密钥</label>
+      <div class="input-password-wrapper">
+        <input id="token" type="password" autocomplete="off" required minlength="32" placeholder="请输入 32 位访问密钥…">
+        <button type="button" class="btn-toggle-eye" aria-label="显示或隐藏密码" title="显示或隐藏密码">
+          <svg class="eye-open" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          <svg class="eye-closed" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><path d="m15 18-.722-3.25M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><line x1="2" x2="22" y1="2" y2="22"/></svg>
+        </button>
+      </div>
+      <button type="submit" class="primary-btn">连接监控服务</button>
+    </form>
   </section>
+
   <div id="workspace" hidden>
-    <section class="card status-card" aria-live="polite"><div class="status-heading"><span id="dot" class="dot"></span><h2 id="status-title">等待登录</h2><button id="refresh-data" class="secondary" type="button" disabled>立即刷新</button></div><p id="status-message"></p></section>
+    <section class="card status-card" aria-live="polite">
+      <div class="status-heading">
+        <span id="dot" class="dot"></span>
+        <div class="status-title-box">
+          <h2 id="status-title">等待登录</h2>
+          <p id="status-message"></p>
+        </div>
+        <button id="refresh-data" class="secondary refresh-btn" type="button" disabled>
+          <svg class="refresh-spinner" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+          <span id="refresh-label">立即刷新</span>
+        </button>
+      </div>
+    </section>
+
     <section id="reading-panel" class="reading-grid" hidden aria-label="最近一次采集">
-      <div class="card reading"><span>剩余电费</span><p><strong id="money">—</strong> 元</p></div>
-      <div class="card reading"><span>剩余电量</span><p><strong id="energy">—</strong> kWh</p></div>
-      <p id="reading-meta" class="hint"></p>
+      <div class="card reading reading-money">
+        <div class="reading-header">
+          <div class="reading-title-wrap">
+            <svg class="reading-icon money-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 6v12"/></svg>
+            <span>剩余电费</span>
+          </div>
+          <span id="money-status-badge" class="reading-badge" hidden></span>
+        </div>
+        <p class="reading-value">
+          <span class="currency-symbol">¥</span><strong id="money">—</strong><span class="unit">元</span>
+        </p>
+      </div>
+
+      <div class="card reading reading-energy">
+        <div class="reading-header">
+          <div class="reading-title-wrap">
+            <svg class="reading-icon energy-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            <span>剩余电量</span>
+          </div>
+        </div>
+        <p class="reading-value">
+          <strong id="energy">—</strong><span class="unit">kWh</span>
+        </p>
+      </div>
+
+      <div class="reading-meta-bar">
+        <svg class="meta-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <p id="reading-meta" class="hint"></p>
+      </div>
     </section>
+
     <section id="trend-panel" class="card trend-card" hidden aria-label="用电趋势">
-      <div class="trend-heading"><h2>用电趋势</h2><span id="trend-estimate" class="trend-estimate" hidden></span></div>
-      <p id="trend-summary" class="hint"></p>
-      <div id="trend-legend" class="trend-legend" hidden><span><i class="trend-dot trend-dot-money"></i>余额（元）</span><span><i class="trend-dot trend-dot-energy"></i>剩余电量（kWh）</span></div>
-      <div id="trend-chart"></div>
-      <p class="hint">最近 30 天，每天取当日最后一次采集的读数。悬浮数据点可查看当日数值。</p>
+      <div class="trend-heading">
+        <div class="trend-title-box">
+          <div class="title-with-icon">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            <h2>用电趋势</h2>
+          </div>
+          <p id="trend-summary" class="hint"></p>
+        </div>
+        <span id="trend-estimate" class="trend-estimate" hidden></span>
+      </div>
+      <div id="trend-legend" class="trend-legend" hidden>
+        <span class="legend-item"><i class="trend-dot trend-dot-money"></i>余额（元）</span>
+        <span class="legend-item"><i class="trend-dot trend-dot-energy"></i>剩余电量（kWh）</span>
+      </div>
+      <div class="chart-container">
+        <div id="trend-chart"></div>
+        <div id="trend-tooltip" class="trend-tooltip" hidden></div>
+      </div>
+      <p class="hint chart-footnote">最近 30 天，每日记录最后一次采集读数。支持移动端滑动或鼠标悬停查看每日明细与单日用电。</p>
     </section>
+
     <section class="card history-card" aria-labelledby="history-title">
-      <h2 id="history-title">最近采集记录</h2>
-      <p class="hint">最近 10 次成功采集，按时间从新到旧排列。时间按浏览器所在时区显示。</p>
-      <p id="history-message" class="hint" role="status">正在读取记录…</p>
-      <div class="history-scroll"><table id="history-table" hidden>
-        <thead><tr><th scope="col">采集时间</th><th scope="col">宿舍</th><th scope="col">电费 / 元</th><th scope="col">电量 / kWh</th></tr></thead>
-        <tbody id="history-rows"></tbody>
-      </table></div>
+      <div class="history-heading">
+        <div class="title-with-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+          <h2 id="history-title">最近采集记录</h2>
+        </div>
+        <span class="history-badge">最近 10 次</span>
+      </div>
+      <p class="hint">按时间从新到旧排列，时间依据浏览器时区解析。</p>
+      <p id="history-message" class="hint history-empty" role="status">正在读取记录…</p>
+      <div class="history-scroll">
+        <table id="history-table" hidden>
+          <thead>
+            <tr>
+              <th scope="col">采集时间</th>
+              <th scope="col">宿舍房间</th>
+              <th scope="col">电费 / 元</th>
+              <th scope="col">电量 / kWh</th>
+            </tr>
+          </thead>
+          <tbody id="history-rows"></tbody>
+        </table>
+      </div>
     </section>
-    <section id="qr-panel" class="card qr-panel" hidden><h2>微信扫码认证</h2><img id="qr" alt="微信登录二维码" width="256" height="256"><p class="hint">请使用手机微信扫一扫，并确认登录。认证完成后页面会自动更新。</p></section>
+
+    <section id="qr-panel" class="card qr-panel" hidden>
+      <div class="qr-heading">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+        <h2>微信扫码认证</h2>
+      </div>
+      <div class="qr-container">
+        <div class="qr-viewfinder">
+          <span class="qr-corner tl"></span><span class="qr-corner tr"></span>
+          <span class="qr-corner bl"></span><span class="qr-corner br"></span>
+          <div class="qr-scan-line"></div>
+          <img id="qr" alt="微信登录二维码" width="256" height="256">
+        </div>
+      </div>
+      <p class="hint">请使用手机微信扫一扫上方二维码，并在手机上确认登录。<br>授权成功后监控将自动开始。</p>
+    </section>
+
     <section id="reauth-panel" class="card" hidden>
-      <p class="eyebrow">第二步</p><h2>完成二次认证</h2>
+      <div class="card-header-row">
+        <div class="card-icon-badge warning">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        </div>
+        <div>
+          <p class="eyebrow">第二步 · 安全验证</p>
+          <h2>完成二次认证</h2>
+        </div>
+      </div>
       <form id="reauth-form">
-        <label for="method">验证方式</label><select id="method"></select>
-        <div id="code-fields"><label for="code">验证码</label><div class="code-row"><input id="code" autocomplete="one-time-code" inputmode="numeric"><button id="send-code" type="button" class="secondary">发送验证码</button></div></div>
-        <div id="reauth-password-fields" hidden><label for="reauth-password">验证密码</label><input id="reauth-password" type="password" autocomplete="current-password"></div>
-        <label class="check"><input id="trust" type="checkbox">记住此设备</label>
-        <button id="verify" type="submit">完成验证</button>
+        <div class="form-group">
+          <label for="method">验证方式</label>
+          <select id="method"></select>
+        </div>
+        <div id="code-fields" class="form-group">
+          <label for="code">验证码</label>
+          <div class="code-row">
+            <input id="code" autocomplete="one-time-code" inputmode="numeric" placeholder="请输入收到的验证码">
+            <button id="send-code" type="button" class="secondary send-code-btn">发送验证码</button>
+          </div>
+        </div>
+        <div id="reauth-password-fields" class="form-group" hidden>
+          <label for="reauth-password">验证密码</label>
+          <div class="input-password-wrapper">
+            <input id="reauth-password" type="password" autocomplete="current-password" placeholder="请输入验证密码">
+            <button type="button" class="btn-toggle-eye" aria-label="显示或隐藏密码" title="显示或隐藏密码">
+              <svg class="eye-open" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="eye-closed" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><path d="m15 18-.722-3.25M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><line x1="2" x2="22" y1="2" y2="22"/></svg>
+            </button>
+          </div>
+        </div>
+        <label class="check custom-checkbox">
+          <input id="trust" type="checkbox">
+          <span class="check-box-icon"></span>
+          <span>记住此设备（后续登录免二次认证）</span>
+        </label>
+        <button id="verify" type="submit" class="primary-btn">完成验证</button>
       </form>
-      <p id="unsupported" class="hint" hidden>这个账号暂时没有可用的验证方式，请重新登录或联系学校认证平台。</p>
+      <p id="unsupported" class="hint alert-hint" hidden>这个账号暂时没有可用的验证方式，请重新登录或联系学校统一身份认证平台。</p>
     </section>
+
     <section id="login-panel" class="card">
-      <p class="eyebrow">学校统一身份认证</p><h2 id="login-title">登录账号</h2>
+      <div class="card-header-row">
+        <div class="card-icon-badge">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 1 0-16 0"/></svg>
+        </div>
+        <div>
+          <p class="eyebrow">统一身份认证</p>
+          <h2 id="login-title">登录校园账号</h2>
+        </div>
+      </div>
       <form id="login-form">
-        <label for="login-type">登录方式</label><select id="login-type"><option value="password">账号密码</option><option value="wechat">微信扫码</option></select>
-        <div id="password-fields"><label for="username">学号 / 账号</label><input id="username" autocomplete="username"><label for="password">密码</label><input id="password" type="password" autocomplete="current-password"></div>
-        <button id="login-button" type="submit">登录</button>
+        <label for="login-type">登录方式</label>
+        <div class="segmented-control" role="tablist">
+          <button type="button" class="segment-btn active" data-type="password" role="tab" aria-selected="true">账号密码登录</button>
+          <button type="button" class="segment-btn" data-type="wechat" role="tab" aria-selected="false">微信扫码登录</button>
+        </div>
+        <select id="login-type" class="sr-only" aria-hidden="true">
+          <option value="password" selected>账号密码</option>
+          <option value="wechat">微信扫码</option>
+        </select>
+        <div id="password-fields">
+          <div class="form-group">
+            <label for="username">学号 / 统一身份认证账号</label>
+            <input id="username" autocomplete="username" placeholder="请输入学号或账号">
+          </div>
+          <div class="form-group">
+            <label for="password">密码</label>
+            <div class="input-password-wrapper">
+              <input id="password" type="password" autocomplete="current-password" placeholder="请输入认证密码">
+              <button type="button" class="btn-toggle-eye" aria-label="显示或隐藏密码" title="显示或隐藏密码">
+                <svg class="eye-open" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg class="eye-closed" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><path d="m15 18-.722-3.25M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><line x1="2" x2="22" y1="2" y2="22"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+        <button id="login-button" type="submit" class="primary-btn">登录并开启监控</button>
       </form>
-      <p class="hint">账号密码只用于本次认证，不保存到配置文件。登录会话加密保存在数据目录中。</p>
+      <div class="security-note">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <p class="hint">账号密码仅在内存中用于本次认证，不写入配置文件；认证会话以加密凭证保存在本地数据目录。</p>
+      </div>
     </section>
-    <button id="cancel" class="secondary" type="button" hidden>取消本次认证</button>
+
+    <button id="cancel" class="secondary cancel-btn" type="button" hidden>
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      <span>取消本次认证</span>
+    </button>
+
     <details id="config-card" class="card config-card">
-      <summary>配置管理</summary>
-      <p id="config-meta" class="hint">正在读取配置…</p>
-      <form id="config-form"></form>
-      <p id="config-message" class="hint" role="status"></p>
-      <div class="notify-test-row">
-        <button id="notify-test" type="button" class="secondary">发送测试通知</button>
-        <span id="notify-test-result" class="hint" role="status"></span>
+      <summary class="config-summary">
+        <div class="summary-left">
+          <svg class="summary-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          <span>配置管理</span>
+        </div>
+        <svg class="chevron-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </summary>
+      <div class="config-content">
+        <p id="config-meta" class="hint config-meta-tag">正在读取配置…</p>
+        <form id="config-form"></form>
+        <p id="config-message" class="hint config-message" role="status"></p>
+        <div class="notify-test-section">
+          <div class="notify-test-row">
+            <button id="notify-test" type="button" class="secondary">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              <span>发送测试通知</span>
+            </button>
+            <span id="notify-test-result" class="hint" role="status"></span>
+          </div>
+          <p class="hint">按当前已保存的生效配置，向每个启用的通知通道发送一条测试消息，用于确认通道可用。</p>
+        </div>
+        <div class="config-actions">
+          <button id="config-save" type="submit" form="config-form" class="primary-btn">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+            <span>保存修改</span>
+          </button>
+          <button id="config-reload" type="button" class="secondary">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+            <span>重载配置</span>
+          </button>
+        </div>
+        <p class="hint config-footnote">保存会写入配置文件并立即重新加载；标注“重启生效”的配置项需重启程序。环境变量（UPM_*）与 Docker Secrets 优先于配置文件中的同名配置。</p>
       </div>
-      <p class="hint">测试会按当前已保存的生效配置，向每个启用的通知通道各发送一条测试消息，用于确认通道可用。</p>
-      <div class="config-actions">
-        <button id="config-save" type="submit" form="config-form">保存修改</button>
-        <button id="config-reload" type="button" class="secondary">重载配置</button>
-      </div>
-      <p class="hint">保存会写入配置文件并立即重新加载；标注“重启生效”的配置项需重启程序。环境变量（UPM_*）与 Docker Secrets 优先于配置文件中的同名配置。</p>
     </details>
-    <footer><span>服务保持运行 · 登录后自动恢复监控</span><button id="disconnect" class="text-button" type="button">断开页面连接</button></footer>
+
+    <footer>
+      <div class="footer-info">
+        <span class="live-dot"></span>
+        <span>服务保持运行 · 登录后自动恢复监控</span>
+      </div>
+      <button id="disconnect" class="text-button" type="button">断开页面连接</button>
+    </footer>
   </div>
-  <p id="error" role="alert" hidden></p>
+
+  <div id="toast-container" class="toast-container" aria-live="assertive">
+    <p id="error" class="toast-alert" role="alert" hidden></p>
+  </div>
 </main>
 </body>
 </html>
