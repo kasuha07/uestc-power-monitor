@@ -20,7 +20,7 @@ use tracing::{debug, error, info, warn};
 
 /// `logout` 子命令：结束服务端会话。
 ///
-/// - 默认：只登出，**保留本地 cookie 文件**（含设备指纹 cookie，下次登录仍被
+/// - 默认：登出并清除本地会话 cookie，**仅保留设备指纹 cookie**（下次登录仍被
 ///   服务端识别为可信设备，免 reauth 弹窗）；
 /// - `clear = true`（`logout --clear`）：登出并删除本地 cookie 文件（含指纹，
 ///   下次登录视为新设备）；登出接口失败（如会话已失效）时仍清除本地文件。
@@ -60,7 +60,7 @@ pub async fn logout(clear: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if clear {
-        // 损坏的 cookie 文件可能在 client 构造时已被自动删除，这里容忍不存在。
+        // 文件可能在构造 client 后被外部删除，这里容忍不存在。
         let cookie_path = std::path::Path::new(&config.cookie_file);
         if cookie_path.exists() {
             std::fs::remove_file(cookie_path).map_err(|e| {
@@ -72,7 +72,7 @@ pub async fn logout(clear: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
         info!("已登出并清除本地 cookie（含设备指纹，下次登录视为新设备）");
     } else {
-        info!("已登出（本地 cookie 与设备指纹保留）");
+        info!("已登出（本地会话 cookie 已清除，设备指纹保留）");
     }
     Ok(())
 }

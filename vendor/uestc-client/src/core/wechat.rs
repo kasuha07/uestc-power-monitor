@@ -62,11 +62,8 @@ impl WechatAuthParams {
             })?
             .to_string();
 
-        log::debug!(
-            "Successfully parsed WeChat OAuth params (appid: {}, state: {})",
-            appid,
-            state
-        );
+        // state 是 OAuth 关联值，属认证凭据，不写入日志。
+        log::debug!("Successfully parsed WeChat OAuth params (appid: {})", appid);
 
         Ok(Self {
             appid,
@@ -194,6 +191,26 @@ pub fn parse_qr_uuid_from_html(html: &str) -> Result<String> {
         })
 }
 
+/// 去掉 URL 的 query 与 fragment，仅保留 scheme/host/path，供日志与错误消息使用。
+///
+/// 认证链路中的 URL 常携带 ticket、OAuth state、code、uuid 等一次性凭据，
+/// 不能原样进入日志。
+pub fn redact_url(url: &str) -> String {
+    match Url::parse(url) {
+        Ok(mut parsed) => {
+            let had_query = parsed.query().is_some() || parsed.fragment().is_some();
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            if had_query {
+                format!("{}?<redacted>", parsed)
+            } else {
+                parsed.to_string()
+            }
+        }
+        Err(_) => "<unparseable-url>".to_string(),
+    }
+}
+
 /// Display QR code in terminal for WeChat login
 pub fn display_qr_in_terminal(uuid: &str) -> Result<()> {
     let qr_url = format!("https://open.weixin.qq.com/connect/confirm?uuid={}", uuid);
@@ -207,7 +224,7 @@ pub fn display_qr_in_terminal(uuid: &str) -> Result<()> {
         }
     })?;
 
-    log::debug!("二维码 URL: {}", qr_url);
+    // 二维码 URL（含 uuid）是一次性登录凭据，只在终端展示，不写入日志。
 
     Ok(())
 }
@@ -508,6 +525,21 @@ mod tests {
             let result = parse_scan_status(body).expect("parse should succeed");
             assert_eq!(result.status, expected, "body: {}", body);
         }
+    }
+
+    #[test]
+    fn redact_url_strips_credentials() {
+        let url =
+            "https://open.weixin.qq.com/connect/confirm?uuid=SECRETUUID&state=SECRETSTATE#frag";
+        let redacted = redact_url(url);
+        assert!(!redacted.contains("SECRETUUID"));
+        assert!(!redacted.contains("SECRETSTATE"));
+        assert!(!redacted.contains("frag"));
+        assert!(redacted.starts_with("https://open.weixin.qq.com/connect/confirm"));
+        assert_eq!(
+            redact_url("https://idas.uestc.edu.cn/authserver/login"),
+            "https://idas.uestc.edu.cn/authserver/login"
+        );
     }
 
     #[test]

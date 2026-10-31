@@ -93,6 +93,9 @@ pub struct ReauthContext {
     pub(crate) re_auth_user_id: String,
     /// 密码加密盐（reauth 页自有，与登录页不同；密码 reauth 才需要）
     pub(crate) pwd_encrypt_salt: Option<String>,
+    /// 发起本次登录的账号（`login(username, ..)` 传入）；reauth 成功后作为会话所属账号。
+    /// 非密码登录链路（如微信扫码后落入 reauth）为 `None`。
+    pub(crate) principal: Option<String>,
 }
 
 impl ReauthContext {
@@ -209,6 +212,7 @@ pub fn parse_reauth_page(html: &str) -> Result<ReauthContext> {
         is_multifactor,
         re_auth_user_id,
         pwd_encrypt_salt: extract_param(block, "pwdEncryptSalt"),
+        principal: None,
     })
 }
 
@@ -408,31 +412,32 @@ fn truncate(body: &str) -> String {
 mod tests {
     use super::*;
 
-    /// 真实 reauth 页样本（2026-08-06 抓取，`work/reauth-page-1786032273641.html`，
-    /// 学号已替换为占位符）。含数盾 OTP 假块在前、真块在后的结构，
-    /// 用于验证「取目标键命中最多块」与「键带双引号」解析。
+    /// 最小合成样本，不含生产抓取内容或任何真实账号的身份与 MFA 配置。
+    /// 前块仅命中一个目标键，后块命中全部目标键；保留双引号键、null、
+    /// 值内 HTML 的冒号与未转义引号，以及平铺/更多 Tab 结构。
+    /// 夹具隐私策略与新增规则见 docs/testing.md。
     const REAUTH_PAGE: &str = include_str!("../../tests/fixtures/reauth-page.html");
 
     #[test]
-    fn parses_real_reauth_page() {
+    fn parses_synthetic_reauth_page() {
         let ctx = parse_reauth_page(REAUTH_PAGE).expect("should parse");
         assert_eq!(ctx.re_auth_type, "8");
         assert_eq!(ctx.is_multifactor, "true");
-        assert_eq!(ctx.re_auth_user_id, "2025XXXXXXXX");
+        assert_eq!(ctx.re_auth_user_id, "TESTUSER0001");
         assert_eq!(ctx.service, "");
-        assert_eq!(ctx.pwd_encrypt_salt.as_deref(), Some("CirR5KGpTcdlxnqJ"));
+        assert_eq!(ctx.pwd_encrypt_salt.as_deref(), Some("TestSalt00000000"));
     }
 
     #[test]
-    fn parses_reauth_tabs_from_real_page() {
+    fn parses_reauth_tabs_from_synthetic_page() {
         let tabs = parse_reauth_tabs(REAUTH_PAGE);
         let ids: Vec<i32> = tabs.iter().map(|m| m.id).collect();
-        assert_eq!(ids, vec![8, 3, 4]);
+        assert_eq!(ids, vec![8, 3, 11]);
         assert_eq!(tabs[0].name, "微信扫码");
         assert!(tabs[0].current, "tab 8 应为当前默认方式");
         assert!(!tabs[1].current);
         assert_eq!(tabs[1].name, "短信验证码");
-        assert_eq!(tabs[2].name, "企业微信验证码");
+        assert_eq!(tabs[2].name, "邮箱验证码");
     }
 
     #[test]
@@ -441,11 +446,11 @@ mod tests {
         let html = r##"<script>
             var reAuthParams = {color:"#FF7D00>",_jar:{map:{},file:null}};
             var reAuthParams = {"isSleepAccount":"0","service":null,"reAuthType":"3",
-                "isMultifactor":"true","reAuthUserId":"2025XXXXXXXX","pwdEncryptSalt":"AbcDef1234567890"};
+                "isMultifactor":"true","reAuthUserId":"TESTUSER0001","pwdEncryptSalt":"TestSalt00000000"};
         </script>"##;
         let ctx = parse_reauth_page(html).expect("should parse");
         assert_eq!(ctx.re_auth_type, "3");
-        assert_eq!(ctx.pwd_encrypt_salt.as_deref(), Some("AbcDef1234567890"));
+        assert_eq!(ctx.pwd_encrypt_salt.as_deref(), Some("TestSalt00000000"));
     }
 
     #[test]
@@ -498,8 +503,9 @@ mod tests {
             service: String::new(),
             re_auth_type: "3".to_string(),
             is_multifactor: "true".to_string(),
-            re_auth_user_id: "2025XXXXXXXX".to_string(),
+            re_auth_user_id: "TESTUSER0001".to_string(),
             pwd_encrypt_salt: None,
+            principal: None,
         };
         let form = submit_form(&ctx, Some("123456"), None, false);
         let map: std::collections::HashMap<_, _> = form.into_iter().collect();

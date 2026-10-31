@@ -12,9 +12,19 @@
 [package]
 edition = "2024"
 name = "uestc-client"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["kasuha07 <me@kasuha.com>"]
 build = false
+include = [
+    "/src/**/*.rs",
+    "/tests/**/*.rs",
+    "/tests/fixtures/reauth-page.html",
+    "/examples/**/*.rs",
+    "/docs/**/*.md",
+    "/README.md",
+    "/CONTEXT.md",
+    "/LICENSE",
+]
 autolib = false
 autobins = false
 autoexamples = false
@@ -45,6 +55,10 @@ path = "examples/blocking_wechat_login.rs"
 [[test]]
 name = "bedroom_query_integration"
 path = "tests/bedroom_query_integration.rs"
+
+[[test]]
+name = "fixture_privacy"
+path = "tests/fixture_privacy.rs"
 
 [dependencies.aes]
 version = "0.8"
@@ -123,8 +137,6 @@ version = "2.1"
 [dev-dependencies.env_logger]
 version = "0.11"
 
-# 仅测试用：本机无系统 OpenSSL 时，让 openssl-sys 以 vendored 方式编译。
-# dev-dependencies 不参与发布，不影响生产构建。
 [dev-dependencies.openssl]
 version = "0.10"
 features = ["vendored"]

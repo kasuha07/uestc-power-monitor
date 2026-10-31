@@ -2,6 +2,9 @@ use reqwest::header;
 use std::time::Duration;
 
 mod cookie_persistence;
+mod session;
+
+pub use cookie_persistence::migrate_plaintext_cookie_file;
 
 #[cfg(feature = "async")]
 pub mod async_impl;

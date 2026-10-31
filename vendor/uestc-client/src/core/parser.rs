@@ -126,6 +126,7 @@ pub fn extract_error_message(html: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "async")]
     #[tokio::test]
     async fn test_parse_login_page() {
         // 请求真实的登录页面

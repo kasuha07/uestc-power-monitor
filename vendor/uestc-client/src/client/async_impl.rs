@@ -1,31 +1,18 @@
 use super::AUTH_SERVER_URL;
-use super::cookie_persistence::{
-    cookie_count, load_encrypted_cookie_store, remove_cookie_file, save_encrypted_cookie_store,
-};
+use super::session::SessionState;
 use crate::core::reauth::{
     self, REAUTH_URL_MARKERS, ReauthContext, ReauthMethod, ReauthMethodKind,
 };
 use crate::{Result, UestcClientError, core};
-use cookie_store::CookieStore;
 use reqwest::header;
 use reqwest::{Client, IntoUrl, Method, RequestBuilder};
-use reqwest_cookie_store::CookieStoreMutex;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 const DEFAULT_COOKIE_FILE: &str = "uestc_cookies.json";
 
-/// 设备指纹 cookie 名：服务端种下的 HttpOnly 持久 cookie，
-/// 作为多因子风控的"可信设备"标识（见 `core::bfp`）。
-pub(crate) const MULTIFACTOR_FINGERPRINT_COOKIE: &str = "MULTIFACTOR_BROWSER_FINGERPRINT";
-
 pub struct UestcClient {
     client: Client,
-    cookie_store: Arc<CookieStoreMutex>,
-    cookie_file: PathBuf,
-    cookie_encryption_secret: Option<Vec<u8>>,
-    /// 多因子设备指纹（32 位大写 hex，服务端只当字符串比对；随实例生成，cookie 持久化复用）
-    bfp_fingerprint: String,
+    session: SessionState,
 }
 
 impl UestcClient {
@@ -33,81 +20,67 @@ impl UestcClient {
         Self::with_cookie_file(DEFAULT_COOKIE_FILE)
     }
 
+    /// 不持久化 cookie 的客户端。`path` 处已有的文件**不会被读取、写入或删除**；
+    /// 需要会话持久化请使用 [`Self::with_encrypted_cookie_file`]。
     pub fn with_cookie_file<P: AsRef<Path>>(path: P) -> Self {
-        Self::with_cookie_file_and_secret(path, None)
+        Self::from_session(SessionState::open_lenient(path.as_ref(), None))
     }
 
+    /// 加密持久化 cookie。文件无法解密（密钥错误、损坏、旧版明文）时记录警告并以
+    /// 空会话启动，原文件保留不动；需要显式处理加载失败请用
+    /// [`Self::try_with_encrypted_cookie_file`]。
     pub fn with_encrypted_cookie_file<P, S>(path: P, encryption_secret: S) -> Self
     where
         P: AsRef<Path>,
         S: AsRef<[u8]>,
     {
-        Self::with_cookie_file_and_secret(path, Some(encryption_secret.as_ref().to_vec()))
+        Self::from_session(SessionState::open_lenient(
+            path.as_ref(),
+            Some(encryption_secret.as_ref().to_vec()),
+        ))
     }
 
-    fn with_cookie_file_and_secret<P: AsRef<Path>>(
-        path: P,
-        cookie_encryption_secret: Option<Vec<u8>>,
-    ) -> Self {
-        Self::with_cookie_file_secret_and_builder(path, cookie_encryption_secret, Client::builder())
+    /// 与 [`Self::with_encrypted_cookie_file`] 相同，但 cookie 文件存在且无法加载时
+    /// 返回错误（文件保持不变），由调用方决定是否迁移、备份或删除。
+    ///
+    /// 旧版（未加密）cookie 文件需先调用 [`crate::migrate_plaintext_cookie_file`] 显式迁移。
+    pub fn try_with_encrypted_cookie_file<P, S>(path: P, encryption_secret: S) -> Result<Self>
+    where
+        P: AsRef<Path>,
+        S: AsRef<[u8]>,
+    {
+        Ok(Self::from_session(SessionState::open(
+            path.as_ref(),
+            Some(encryption_secret.as_ref().to_vec()),
+        )?))
     }
 
-    /// Use a custom transport (for example an explicit proxy), retaining the same
-    /// encrypted cookie store, timeout defaults and authentication protocol.
-    pub fn with_encrypted_cookie_file_and_builder<P: AsRef<Path>, S: AsRef<[u8]>>(
+    /// 与 [`Self::with_encrypted_cookie_file`] 相同，但使用调用方提供的
+    /// `reqwest::ClientBuilder`（例如显式代理），保留相同的加密 cookie store、
+    /// 默认请求头、超时设置与认证协议。
+    pub fn with_encrypted_cookie_file_and_builder<P, S>(
         path: P,
         encryption_secret: S,
         builder: reqwest::ClientBuilder,
-    ) -> Self {
-        Self::with_cookie_file_secret_and_builder(
-            path,
-            Some(encryption_secret.as_ref().to_vec()),
+    ) -> Self
+    where
+        P: AsRef<Path>,
+        S: AsRef<[u8]>,
+    {
+        Self::from_session_and_builder(
+            SessionState::open_lenient(path.as_ref(), Some(encryption_secret.as_ref().to_vec())),
             builder,
         )
     }
 
-    fn with_cookie_file_secret_and_builder<P: AsRef<Path>>(
-        path: P,
-        cookie_encryption_secret: Option<Vec<u8>>,
-        builder: reqwest::ClientBuilder,
-    ) -> Self {
-        let cookie_file = path.as_ref().to_path_buf();
+    fn from_session(session: SessionState) -> Self {
+        Self::from_session_and_builder(session, Client::builder())
+    }
 
-        // Try to load existing cookies
-        let cookie_store = if cookie_file.exists() {
-            log::debug!("发现 cookie 文件: {:?}", cookie_file);
-            match cookie_encryption_secret.as_deref() {
-                Some(secret) if !secret.is_empty() => {
-                    match load_encrypted_cookie_store(&cookie_file, secret) {
-                        Ok(store) => {
-                            log::debug!("成功加载 {} 个加密 cookies", cookie_count(&store));
-                            store
-                        }
-                        Err(e) => {
-                            log::warn!("加载加密 cookie 失败: {}", e);
-                            // An incorrect key must not destroy the previous session file.
-                            // A later successful login may replace it with valid cookies.
-                            log::warn!("保留无法读取的 cookie 文件，等待配置正确密钥或重新登录");
-                            Arc::new(CookieStoreMutex::new(CookieStore::default()))
-                        }
-                    }
-                }
-                _ => {
-                    log::warn!(
-                        "cookie 文件存在但未配置加密密钥，已忽略该文件以避免明文 cookie 落盘"
-                    );
-                    remove_cookie_file(&cookie_file, "未配置加密密钥，不保留现有 cookie 文件");
-                    Arc::new(CookieStoreMutex::new(CookieStore::default()))
-                }
-            }
-        } else {
-            log::debug!("cookie 文件不存在: {:?}", cookie_file);
-            Arc::new(CookieStoreMutex::new(CookieStore::default()))
-        };
-
+    fn from_session_and_builder(session: SessionState, builder: reqwest::ClientBuilder) -> Self {
         let client = builder
             .default_headers(super::default_headers())
-            .cookie_provider(cookie_store.clone())
+            .cookie_provider(session.cookie_store.clone())
             .connect_timeout(super::CONNECT_TIMEOUT)
             .timeout(super::REQUEST_TIMEOUT)
             .pool_idle_timeout(super::POOL_IDLE_TIMEOUT)
@@ -115,41 +88,18 @@ impl UestcClient {
             .build()
             .expect("Failed to build client");
 
-        let bfp_fingerprint = Self::fingerprint_from_cookie_store(&cookie_store);
-
-        Self {
-            client,
-            cookie_store,
-            cookie_file,
-            cookie_encryption_secret,
-            bfp_fingerprint,
-        }
+        Self { client, session }
     }
 
     pub fn with_client(client: Client) -> Self {
-        let cookie_store = Arc::new(CookieStoreMutex::new(CookieStore::default()));
         Self {
             client,
-            cookie_store,
-            cookie_file: PathBuf::from(DEFAULT_COOKIE_FILE),
-            cookie_encryption_secret: None,
-            bfp_fingerprint: core::bfp::random_fingerprint(),
+            session: SessionState::in_memory(PathBuf::from(DEFAULT_COOKIE_FILE)),
         }
     }
 
-    /// 复用 cookie store 中已持久化的设备指纹（无则随机生成）。
-    /// 指纹是"可信设备"标识：只有每次上报同值，服务端才能持续识别
-    /// 本机为可信设备——退出登录后保留的指纹 cookie 因此继续有效。
-    fn fingerprint_from_cookie_store(cookie_store: &Arc<CookieStoreMutex>) -> String {
-        cookie_store
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter_any()
-            .find(|c| c.name() == MULTIFACTOR_FINGERPRINT_COOKIE)
-            .map(|c| c.value())
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(core::bfp::random_fingerprint)
+    fn save_cookie_store(&self) -> Result<()> {
+        self.session.save()
     }
 
     /// 显式持久化当前会话，供需要确认落盘成功的调用方使用。
@@ -157,33 +107,26 @@ impl UestcClient {
         self.save_cookie_store()
     }
 
-    fn save_cookie_store(&self) -> Result<()> {
-        let secret = self.cookie_encryption_secret.as_deref().ok_or_else(|| {
-            UestcClientError::CookieError {
-                operation: "encrypt".to_string(),
-                file_path: Some(self.cookie_file.display().to_string()),
-                message: "Cookie encryption secret is not configured; refusing to write plaintext cookies".to_string(),
-                source: None,
-            }
-        })?;
-
-        log::debug!(
-            "加密保存 {} 个 cookies 到: {:?}",
-            cookie_count(&self.cookie_store),
-            self.cookie_file
-        );
-        save_encrypted_cookie_store(&self.cookie_file, &self.cookie_store, secret)?;
-        log::debug!("cookies 已成功加密保存");
-        Ok(())
+    /// 丢弃本地会话（保留设备指纹），用于当前会话属于其他账号或无法确认归属时。
+    fn discard_local_session(&self) {
+        self.session.clear(true);
+        if let Err(e) = self.session.save_if_persistent() {
+            log::warn!("丢弃本地会话后保存 cookie 失败: {}", e);
+        }
     }
 
     pub async fn login(&self, username: &str, password: &str) -> Result<()> {
         log::info!("Starting login for user: {}", username);
 
-        // Check if session is already active
+        // 已有会话只在确认属于同一账号时复用；归属不明或属于其他账号时丢弃本地会话，
+        // 用传入的凭据重新登录。
         if self.is_session_active().await {
-            log::info!("Session already active, skipping login");
-            return Ok(());
+            if self.session.principal().as_deref() == Some(username) {
+                log::info!("Session already active for this user, skipping login");
+                return Ok(());
+            }
+            log::warn!("现有会话不属于本次登录账号（或归属未知），丢弃本地会话后重新登录");
+            self.discard_local_session();
         }
 
         // Perform password login
@@ -191,17 +134,29 @@ impl UestcClient {
 
         log::debug!("Fetching login page");
         // Get login page without service parameter
-        let resp = self.client.get(&login_url).send().await?;
+        let mut resp = self.client.get(&login_url).send().await?;
 
         // 带锁定 TGT（上次 reauth 未完成）时 GET /login 会被 302 到 reauth 页
-        let login_page_url = resp.url().to_string();
-        if is_reauth_url(&login_page_url) {
+        if is_reauth_url(resp.url().as_str()) {
             let html = resp.text().await?;
-            let context = reauth::parse_reauth_page(&html)?;
-            log::warn!("发现未完成的 reauth 会话（TGT 已发但被锁定），返回 ReauthRequired");
-            return Err(UestcClientError::ReauthRequired {
-                context: Box::new(context),
-            });
+            let mut context = reauth::parse_reauth_page(&html)?;
+            if context.re_auth_user_id == username {
+                log::warn!("发现未完成的 reauth 会话（TGT 已发但被锁定），返回 ReauthRequired");
+                context.principal = Some(username.to_string());
+                return Err(UestcClientError::ReauthRequired {
+                    context: Box::new(context),
+                });
+            }
+            // 锁定的 TGT 属于其他账号：不能把它的 reauth 交给本次调用方完成
+            log::warn!("未完成的 reauth 会话属于其他账号，丢弃本地会话后重新登录");
+            self.discard_local_session();
+            resp = self.client.get(&login_url).send().await?;
+            if is_reauth_url(resp.url().as_str()) {
+                return Err(UestcClientError::LoginFailed {
+                    message: "清除本地会话后登录页仍跳转到 reauth 页".to_string(),
+                    username: Some(username.to_string()),
+                });
+            }
         }
         let html = resp.text().await?;
 
@@ -236,11 +191,16 @@ impl UestcClient {
         let final_url = resp.url().to_string();
         let html = resp.text().await?;
 
-        log::debug!("Login response status: {}, URL: {}", status, final_url);
+        log::debug!(
+            "Login response status: {}, URL: {}",
+            status,
+            core::wechat::redact_url(&final_url)
+        );
 
         // 多因子策略：密码校验通过（TGT 已发）但被 302 到 reauth 页锁定
         if is_reauth_url(&final_url) {
-            let context = reauth::parse_reauth_page(&html)?;
+            let mut context = reauth::parse_reauth_page(&html)?;
+            context.principal = Some(username.to_string());
             log::warn!(
                 "账号需要多因子认证（reauth）：TGT 已发但被锁定，可用方式 {:?}",
                 context
@@ -259,6 +219,7 @@ impl UestcClient {
             && !final_url.contains("/authserver/login")
         {
             log::info!("Login successful for user: {}", username);
+            self.session.set_principal(Some(username.to_string()));
             // Save cookies after successful login
             if let Err(e) = self.save_cookie_store() {
                 log::warn!("Failed to save cookies after login: {}", e);
@@ -281,32 +242,51 @@ impl UestcClient {
     /// 上报 bfp 设备指纹（GET /bfp/info?bfp=<32hex>，换 HttpOnly 持久 cookie）。
     /// 失败只记日志，不阻断登录（live 实测证明流程不依赖它）。
     async fn report_bfp(&self) {
-        let url = format!("{}/bfp/info?bfp={}", AUTH_SERVER_URL, self.bfp_fingerprint);
+        let url = format!(
+            "{}/bfp/info?bfp={}",
+            AUTH_SERVER_URL,
+            self.session.fingerprint()
+        );
         match self.client.get(&url).send().await {
             Ok(resp) => log::debug!("bfp 指纹上报完成 (HTTP {})", resp.status()),
             Err(e) => log::warn!("bfp 指纹上报失败（不影响登录）: {}", e),
         }
     }
 
+    /// 退出登录：请求 IDAS `/logout`，并清除本地会话。
+    ///
+    /// 无论服务端请求是否成功，本地内存与加密 cookie 文件中的会话/业务 cookie
+    /// 都会被清除，**仅保留**设备指纹 cookie（`MULTIFACTOR_BROWSER_FINGERPRINT`），
+    /// 使下次登录时服务端仍识别本机为可信设备（免 reauth）。
+    /// 需要连同可信设备标识一起清除时，请使用 [`Self::logout_and_forget_device`]。
     pub async fn logout(&self) -> Result<()> {
+        self.logout_inner(true).await
+    }
+
+    /// 退出登录并清除全部本地 cookie（包括设备指纹），之后本机不再被视为可信设备。
+    pub async fn logout_and_forget_device(&self) -> Result<()> {
+        self.logout_inner(false).await
+    }
+
+    async fn logout_inner(&self, keep_device_fingerprint: bool) -> Result<()> {
         log::info!("Attempting to logout");
 
         let logout_url = format!("{}/logout", AUTH_SERVER_URL);
-        let resp = self.client.get(&logout_url).send().await?;
+        let server_result = self.client.get(&logout_url).send().await;
 
-        if resp.status().is_success() {
-            log::info!("Logout successful");
-            // 只结束服务端会话，**不清理本地 cookie 文件**：设备指纹 cookie
-            // （MULTIFACTOR_BROWSER_FINGERPRINT）保留后，下次登录复用同值上报，
-            // 服务端仍识别本机为可信设备（免 reauth 弹窗）。需要彻底清除本地
-            // cookie（含指纹）时，由调用方自行删除 cookie 文件。
-            return Ok(());
+        // 先清本地，再报告服务端结果：服务端失败时也不在本地残留凭据。
+        self.session.clear(keep_device_fingerprint);
+        let save_result = self.session.save_if_persistent();
+
+        let resp = server_result?;
+        if !resp.status().is_success() {
+            let error_msg = format!("Logout failed with status: {}", resp.status());
+            log::error!("{}", error_msg);
+            return Err(UestcClientError::LogoutFailed { message: error_msg });
         }
-
-        let error_msg = format!("Logout failed with status: {}", resp.status());
-        log::error!("{}", error_msg);
-
-        Err(UestcClientError::LogoutFailed { message: error_msg })
+        save_result?;
+        log::info!("Logout successful");
+        Ok(())
     }
 
     /// Login using WeChat QR code
@@ -345,7 +325,7 @@ impl UestcClient {
             return Err(UestcClientError::WeChatError {
                 message: format!(
                     "Failed to redirect to WeChat login page, current URL: {}",
-                    wechat_auth_url
+                    wechat::redact_url(&wechat_auth_url)
                 ),
             });
         }
@@ -360,7 +340,7 @@ impl UestcClient {
         let xml_text = resp.text().await?;
         let uuid = wechat::parse_qr_uuid_from_xml(&xml_text)?;
 
-        // Step 3: Display QR code in terminal
+        // Step 3: Hand the QR code to the caller (terminal by default)
         on_qr(&uuid)?;
 
         // Step 4: Poll for scan status
@@ -433,15 +413,22 @@ impl UestcClient {
         let resp = self.client.get(&callback_url).send().await?;
         let final_url = resp.url().to_string();
 
+        // Consume the response body to ensure cookies are properly captured
         let body = resp.text().await?;
+
+        // 扫码后 TGT 被多因子锁定（落在 reauth 页）：不是可用会话，交给调用方完成 reauth。
         if is_reauth_url(&final_url) {
+            log::warn!("微信扫码后进入 reauth 页（TGT 被多因子锁定），返回 ReauthRequired");
+            let context = reauth::parse_reauth_page(&body)?;
             return Err(UestcClientError::ReauthRequired {
-                context: Box::new(reauth::parse_reauth_page(&body)?),
+                context: Box::new(context),
             });
         }
 
         // Check if login succeeded by examining the final URL
         if !final_url.contains("/authserver/login") {
+            // 微信登录无法得知账号，会话归属记为未知；之后 login(username, ..) 不会复用它。
+            self.session.set_principal(None);
             // Save cookies after successful login
             if let Err(e) = self.save_cookie_store() {
                 log::warn!("Failed to save cookies after WeChat login: {}", e);
@@ -460,30 +447,7 @@ impl UestcClient {
     /// 供无人值守调用方（如 power-monitor）在会话失效后、由外部进程
     /// （`--reauth` 子命令）写入了新 cookie 文件时恢复会话。
     pub fn reload_cookie_file(&self) -> Result<()> {
-        let secret = self.cookie_encryption_secret.as_deref().ok_or_else(|| {
-            UestcClientError::CookieError {
-                operation: "load".to_string(),
-                file_path: Some(self.cookie_file.display().to_string()),
-                message: "Cookie encryption secret is not configured; cannot reload cookies"
-                    .to_string(),
-                source: None,
-            }
-        })?;
-
-        if !self.cookie_file.exists() {
-            log::warn!("cookie 文件不存在，无法重载: {:?}", self.cookie_file);
-            return Ok(());
-        }
-
-        let loaded = load_encrypted_cookie_store(&self.cookie_file, secret)?;
-        let new_store = loaded.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        *self.cookie_store.lock().unwrap_or_else(|p| p.into_inner()) = new_store;
-        log::debug!(
-            "已从磁盘重载 {} 个 cookies: {:?}",
-            cookie_count(&self.cookie_store),
-            self.cookie_file
-        );
-        Ok(())
+        self.session.reload()
     }
 
     /// 切换 reauth 方式（POST /reAuthCheck/changeReAuthType.do）。
@@ -615,10 +579,11 @@ impl UestcClient {
                 message: format!("方式 {}={} 未实现", method.id, method.name),
             }),
         };
-        if result.is_ok()
-            && let Err(e) = self.save_cookie_store()
-        {
-            log::warn!("reauth 成功后保存 cookie 失败: {}", e);
+        if result.is_ok() {
+            self.session.set_principal(ctx.principal.clone());
+            if let Err(e) = self.save_cookie_store() {
+                log::warn!("reauth 成功后保存 cookie 失败: {}", e);
+            }
         }
         result
     }
@@ -675,7 +640,7 @@ impl UestcClient {
             return Err(UestcClientError::WeChatError {
                 message: format!(
                     "combinedLogin(reauth) 未跳转到微信登录页，当前 URL: {}",
-                    wechat_auth_url
+                    wechat::redact_url(&wechat_auth_url)
                 ),
             });
         }
@@ -793,12 +758,20 @@ impl UestcClient {
         let final_url = resp.url().to_string();
         let body = resp.text().await?;
 
+        if is_reauth_url(&final_url) {
+            return Err(UestcClientError::ReauthFailed {
+                message: "reauth 提交后 /login 仍跳转到 reauth 页，TGT 仍处于锁定状态".to_string(),
+            });
+        }
         if final_url.contains("ticket=ST-") {
             log::info!("reauth 完成，ST 已在跳转链中发放");
             return Ok(());
         }
         if status.is_success() && !final_url.contains("/authserver/login") {
-            log::info!("reauth 完成，已进入业务系统: {}", final_url);
+            log::info!(
+                "reauth 完成，已进入业务系统: {}",
+                core::wechat::redact_url(&final_url)
+            );
             return Ok(());
         }
 
@@ -813,6 +786,7 @@ impl UestcClient {
         let resp = self.client.post(&login_url).form(&form).send().await?;
         let final_url = resp.url().to_string();
         if (resp.status().is_redirection() || resp.status().is_success())
+            && !is_reauth_url(&final_url)
             && (final_url.contains("ticket=ST-") || !final_url.contains("/authserver/login"))
         {
             log::info!("reauth 完成，近空表单重登后进入业务系统");
@@ -843,7 +817,10 @@ impl UestcClient {
                     }
                     true
                 } else {
-                    log::debug!("Session is not active (URL: {})", final_url);
+                    log::debug!(
+                        "Session is not active (URL: {})",
+                        core::wechat::redact_url(&final_url)
+                    );
                     false
                 }
             }
@@ -891,34 +868,6 @@ fn is_reauth_url(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fingerprint_reused_from_store() {
-        let store = Arc::new(CookieStoreMutex::new(CookieStore::default()));
-        let url = url::Url::parse("https://idas.uestc.edu.cn/").expect("parse url");
-        let cookie = cookie_store::Cookie::parse(
-            "MULTIFACTOR_BROWSER_FINGERPRINT=ABCDEF0123456789ABCDEF0123456789; Path=/; HttpOnly",
-            &url,
-        )
-        .expect("parse cookie");
-        store
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(cookie, &url);
-
-        assert_eq!(
-            UestcClient::fingerprint_from_cookie_store(&store),
-            "ABCDEF0123456789ABCDEF0123456789"
-        );
-    }
-
-    #[test]
-    fn fingerprint_generated_when_store_has_none() {
-        let store = Arc::new(CookieStoreMutex::new(CookieStore::default()));
-        let fp = UestcClient::fingerprint_from_cookie_store(&store);
-        assert_eq!(fp.len(), 32);
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
-    }
 
     #[tokio::test]
     async fn test_new() {

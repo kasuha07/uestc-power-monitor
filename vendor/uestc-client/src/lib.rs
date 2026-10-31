@@ -7,6 +7,8 @@ pub use client::UestcClient;
 #[cfg(feature = "blocking")]
 pub use client::UestcBlockingClient;
 
+pub use client::migrate_plaintext_cookie_file;
+
 pub use core::reauth::{ReauthContext, ReauthMethod, ReauthMethodKind};
 
 use thiserror::Error;
