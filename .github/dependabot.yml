@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # 工作流里的 Action 与 Dockerfile 的基础镜像都按 SHA/摘要固定，
+  # 由 Dependabot 提出可审查的升级 PR。
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

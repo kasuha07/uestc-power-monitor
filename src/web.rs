@@ -997,13 +997,18 @@ fn write_config_file(path: &Path, content: &str) -> std::io::Result<()> {
         options.create_new(true).write(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            let mode = std::fs::metadata(path)
-                .map(|metadata| metadata.permissions().mode() & 0o777)
-                .unwrap_or(0o600);
-            options.mode(mode);
+            use std::os::unix::fs::OpenOptionsExt;
+            // 配置里可能有密码、Cookie 密钥、通知凭据和 Web 访问密钥：不论原文件
+            // 权限如何（例如从 0644 的示例复制而来），替换后一律收紧为 0600。
+            options.mode(0o600);
         }
         let mut file = options.open(&temporary)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // 显式设置，避免依赖 umask；在 rename 发布之前完成。
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(content.as_bytes())?;
         file.sync_all()?;
         std::fs::rename(&temporary, path)?;
@@ -1145,14 +1150,18 @@ pub(crate) async fn run(config: AppConfig) -> Result<(), Box<dyn std::error::Err
     db.init().await?;
     let state = WebState::new(&config, token, db.clone())?;
     let listener = tokio::net::TcpListener::bind(&config.web.bind).await?;
-    info!(
-        "Web 登录页：http://{} （访问密钥文件：{}）",
-        listener.local_addr()?,
-        token_path.display()
-    );
+    // 访问密钥是唯一的管理凭据，绝不写入日志（日志可能被权限更低的人读取）。
     if config.web.access_token.is_none() {
-        // This capability is intentionally given to the operator, never in a URL or an API response.
-        info!("Web 访问密钥：{}", state.token);
+        info!(
+            "Web 登录页：http://{} （访问密钥保存在 {}，权限 0600）",
+            listener.local_addr()?,
+            token_path.display()
+        );
+    } else {
+        info!(
+            "Web 登录页：http://{} （访问密钥使用配置项 web.access_token）",
+            listener.local_addr()?
+        );
     }
     let initial = if Path::new(&config.cookie_file).is_file() {
         Some(Action::Resume)

@@ -61,6 +61,9 @@ fn prompt_line(prompt: &str) -> Result<String, String> {
 
 pub struct ApiService {
     pub(crate) client: UestcClient,
+    /// 跟随电费网关直连地址专用：独立客户端（无 Cookie、不跟随重定向），
+    /// 且只允许固定的网关目标。
+    gateway: GatewayFollower,
     browser_mode: bool,
     config: AppConfig,
     login_throttle: LoginThrottle,
@@ -109,6 +112,7 @@ impl ApiService {
 
         Ok(Self {
             client,
+            gateway: GatewayFollower::production()?,
             browser_mode,
             config: config.clone(),
             login_throttle: LoginThrottle::new(),
@@ -418,7 +422,7 @@ impl ApiService {
     /// 走 `fetch_power_response_with_gateway_retry`：门户接口返回业务失败且
     /// 服务端下发了直连查询地址时，跟随它再取一次。
     async fn fetch_power_response(&self, url: &str) -> Result<PowerResponse, FetchError> {
-        fetch_power_response_with_gateway_retry(&self.client, url).await
+        fetch_power_response_with_gateway_retry(&self.client, &self.gateway, url).await
     }
 
     pub async fn fetch_data(&self) -> Result<Option<PowerInfo>, Box<dyn std::error::Error>> {
@@ -512,13 +516,9 @@ fn power_data_request(client: &UestcClient, url: &str) -> reqwest::RequestBuilde
 /// 关键点是先把响应体读出来再解析，而不是直接用 `resp.json()`：后者失败时
 /// 只会给出 "error decoding response body"，上游到底返回了什么全部丢失。
 async fn fetch_power_response(
-    client: &UestcClient,
-    url: &str,
+    request: reqwest::RequestBuilder,
 ) -> Result<PowerResponse, FetchError> {
-    let mut resp = power_data_request(client, url)
-        .send()
-        .await
-        .map_err(FetchError::transport)?;
+    let mut resp = request.send().await.map_err(FetchError::transport)?;
 
     let status = resp.status();
     let content_type = resp
@@ -556,19 +556,31 @@ async fn fetch_power_response(
 /// 绝不进日志（`describe_retry_url` 保证）。
 async fn fetch_power_response_with_gateway_retry(
     client: &UestcClient,
+    gateway: &GatewayFollower,
     url: &str,
 ) -> Result<PowerResponse, FetchError> {
-    match fetch_power_response(client, url).await {
+    match fetch_power_response(power_data_request(client, url)).await {
         Ok(resp) => Ok(resp),
         Err(FetchError::Business {
             retry_url: Some(retry),
             ..
         }) => {
+            let Some(target) = gateway.validate(&retry) else {
+                // 地址不是预期的电费网关：可能是上游被篡改或被劫持，绝不跟随
+                // （防止被用来向内网/本机/元数据服务发请求）。
+                warn!(
+                    "Electricity gateway retry endpoint rejected: not the expected gateway ({})",
+                    describe_retry_url(&retry)
+                );
+                return Err(FetchError::FollowFailed {
+                    source: Box::new(FetchError::RetryRejected),
+                });
+            };
             warn!(
                 "Electricity gateway asked for a direct query; following its retry endpoint ({})",
                 describe_retry_url(&retry)
             );
-            match fetch_power_response(client, &retry).await {
+            match fetch_power_response(gateway.request(target)).await {
                 Ok(resp) => Ok(resp),
                 // 跟随失败与门户会话无关（内网网关独立于门户），必须标记出来：
                 // 否则按普通传输错误处理会误判为会话失效，白跑会话探测甚至
@@ -579,6 +591,88 @@ async fn fetch_power_response_with_gateway_retry(
             }
         }
         Err(err) => Err(err),
+    }
+}
+
+/// 电费网关直连查询的唯一允许目标（门户业务失败时下发的 `url`）。
+///
+/// 该网关只提供明文 HTTP，无法强制 TLS；因此跟随前严格校验目标，只允许
+/// 这一个固定 IP/端口/路径，并用独立的无 Cookie、禁止重定向的客户端发请求，
+/// 防止被篡改的响应把监控变成向内网、本机或云元数据服务发请求的跳板（SSRF）。
+const GATEWAY_SCHEME: &str = "http";
+const GATEWAY_HOST: &str = "222.197.164.98";
+const GATEWAY_PORT: u16 = 7000;
+const GATEWAY_PATH: &str = "/zxapi/services/query/findeletric";
+
+/// 跟随电费网关直连地址：允许的目标 + 专用 HTTP 客户端。
+pub(crate) struct GatewayFollower {
+    client: reqwest::Client,
+    scheme: &'static str,
+    host: String,
+    port: u16,
+    path: &'static str,
+}
+
+impl GatewayFollower {
+    fn production() -> Result<Self, reqwest::Error> {
+        Self::new(
+            GATEWAY_SCHEME,
+            GATEWAY_HOST.to_string(),
+            GATEWAY_PORT,
+            GATEWAY_PATH,
+        )
+    }
+
+    fn new(
+        scheme: &'static str,
+        host: String,
+        port: u16,
+        path: &'static str,
+    ) -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder()
+            // 不跟随重定向：否则校验过的地址可以再被 3xx 指到任意目标。
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
+            .build()?;
+        Ok(Self {
+            client,
+            scheme,
+            host,
+            port,
+            path,
+        })
+    }
+
+    /// 只接受 `scheme://host:port/path?sign=...&data=...` 这一种形态：
+    /// 主机、端口、路径必须与预期完全一致，不允许 userinfo 与 fragment，
+    /// 且 query 必须带非空的 sign 与 data。
+    fn validate(&self, raw: &str) -> Option<url::Url> {
+        let url = url::Url::parse(raw).ok()?;
+        let host_ok = match url.host()? {
+            url::Host::Ipv4(ip) => ip.to_string() == self.host,
+            url::Host::Domain(domain) => domain == self.host,
+            url::Host::Ipv6(_) => false,
+        };
+        let has = |key: &str| url.query_pairs().any(|(k, v)| k == key && !v.is_empty());
+        let ok = url.scheme() == self.scheme
+            && host_ok
+            && url.port_or_known_default() == Some(self.port)
+            && url.path() == self.path
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none()
+            && has("sign")
+            && has("data");
+        ok.then_some(url)
+    }
+
+    fn request(&self, url: url::Url) -> reqwest::RequestBuilder {
+        self.client
+            .get(url)
+            .header("Referer", "https://online.uestc.edu.cn/page/")
+            .header("Accept", "application/json, text/plain, */*")
     }
 }
 
@@ -836,6 +930,9 @@ enum FetchError {
         /// 跟随失败时的原始错误（已按既有规则脱敏）。
         source: Box<FetchError>,
     },
+    /// 服务端下发的直连地址不是预期的电费网关（主机/端口/路径/参数不符），
+    /// 拒绝跟随。只出现在 `FollowFailed` 内部。
+    RetryRejected,
 }
 
 impl FetchError {
@@ -879,7 +976,7 @@ impl FetchError {
             // 状态码本身就是鉴权信号，与 `Shape` 同规则处理。
             FetchError::Business { status, .. } => session_expired_status(*status),
             // 跟随直连地址失败说明的是内网网关连通性/形态，与门户会话无关。
-            FetchError::FollowFailed { .. } => false,
+            FetchError::FollowFailed { .. } | FetchError::RetryRejected => false,
         }
     }
 }
@@ -939,6 +1036,10 @@ impl fmt::Display for FetchError {
                 f,
                 "direct query via the gateway-provided retry endpoint failed: {}",
                 source
+            ),
+            FetchError::RetryRejected => write!(
+                f,
+                "retry endpoint is not the expected electricity gateway; refused to follow"
             ),
         }
     }
@@ -1807,17 +1908,33 @@ mod tests {
         .to_string()
     }
 
+    /// 测试用网关：指向本机测试服务器端口，其余规则与生产一致。
+    fn loopback_gateway(port: u16) -> GatewayFollower {
+        GatewayFollower::new("http", "127.0.0.1".into(), port, GATEWAY_PATH).expect("gateway")
+    }
+
+    /// 把 `serve_once` 的根地址变成网关形态的直连地址，并返回端口。
+    fn gateway_url(base: &str) -> (String, u16) {
+        let port = url::Url::parse(base).unwrap().port().unwrap();
+        (
+            format!("{base}{}?sign=SIG&data=DATA", &GATEWAY_PATH[1..]),
+            port,
+        )
+    }
+
     #[tokio::test]
     async fn gateway_retry_follows_the_server_provided_direct_query_url() {
         // 门户接口返回业务失败（带直连地址）→ 跟随该地址再取一次 → 拿到读数。
-        let data_url = serve_once(sample_json_with_values("26.91", "14.44").into_bytes()).await;
+        let (data_url, port) =
+            gateway_url(&serve_once(sample_json_with_values("26.91", "14.44").into_bytes()).await);
         let failure_url =
             serve_once(business_failure_body_pointing_at(&data_url).into_bytes()).await;
 
         let client = UestcClient::with_client(reqwest::Client::new());
-        let resp = fetch_power_response_with_gateway_retry(&client, &failure_url)
-            .await
-            .expect("should follow the retry endpoint and succeed");
+        let resp =
+            fetch_power_response_with_gateway_retry(&client, &loopback_gateway(port), &failure_url)
+                .await
+                .expect("should follow the retry endpoint and succeed");
         let data = resp.body.data.expect("readings");
         assert!((data.remaining_money - 14.44).abs() < f64::EPSILON);
         assert!((data.remaining_energy - 26.91).abs() < f64::EPSILON);
@@ -1828,7 +1945,8 @@ mod tests {
         // 不是业务失败（响应不是 JSON）：不做任何跟随，直接报错。
         let url = serve_once(b"not json at all".to_vec()).await;
         let client = UestcClient::with_client(reqwest::Client::new());
-        let err = fetch_power_response_with_gateway_retry(&client, &url)
+        let gateway = GatewayFollower::production().unwrap();
+        let err = fetch_power_response_with_gateway_retry(&client, &gateway, &url)
             .await
             .expect_err("must fail");
         assert!(matches!(err, FetchError::NotJson { .. }), "got: {:?}", err);
@@ -1838,13 +1956,17 @@ mod tests {
     async fn gateway_retry_propagates_a_failed_retry_request() {
         // 业务失败带直连地址，但该地址连不上：报跟随失败，不吞掉错误。
         let failure_url = serve_once(
-            business_failure_body_pointing_at("http://127.0.0.1:1/zxapi/findeletric").into_bytes(),
+            business_failure_body_pointing_at(
+                "http://127.0.0.1:1/zxapi/services/query/findeletric?sign=S&data=D",
+            )
+            .into_bytes(),
         )
         .await;
         let client = UestcClient::with_client(reqwest::Client::new());
-        let err = fetch_power_response_with_gateway_retry(&client, &failure_url)
-            .await
-            .expect_err("must fail");
+        let err =
+            fetch_power_response_with_gateway_retry(&client, &loopback_gateway(1), &failure_url)
+                .await
+                .expect_err("must fail");
         let FetchError::FollowFailed { source } = &err else {
             panic!("expected FollowFailed, got: {:?}", err);
         };
@@ -1859,6 +1981,81 @@ mod tests {
         let rendered = err.to_string();
         assert!(!rendered.contains("findeletric"), "leaked: {}", rendered);
         assert!(!rendered.contains("sign="), "leaked: {}", rendered);
+    }
+
+    #[tokio::test]
+    async fn gateway_retry_refuses_urls_outside_the_expected_gateway() {
+        // 上游下发的地址指向本机任意端口：生产规则下必须拒绝，且不发起请求。
+        let (data_url, _) =
+            gateway_url(&serve_once(sample_json_with_values("1", "1").into_bytes()).await);
+        let failure_url =
+            serve_once(business_failure_body_pointing_at(&data_url).into_bytes()).await;
+        let client = UestcClient::with_client(reqwest::Client::new());
+        let gateway = GatewayFollower::production().unwrap();
+        let err = fetch_power_response_with_gateway_retry(&client, &gateway, &failure_url)
+            .await
+            .expect_err("must refuse");
+        let FetchError::FollowFailed { source } = &err else {
+            panic!("expected FollowFailed, got: {:?}", err);
+        };
+        assert!(
+            matches!(**source, FetchError::RetryRejected),
+            "got: {source:?}"
+        );
+        assert!(!err.session_may_be_stale());
+    }
+
+    #[test]
+    fn gateway_validation_accepts_only_the_exact_gateway_shape() {
+        let gateway = GatewayFollower::production().unwrap();
+        let ok = "http://222.197.164.98:7000/zxapi/services/query/findeletric?sign=a&data=b";
+        assert!(gateway.validate(ok).is_some());
+        for bad in [
+            // 回环、链路本地/元数据、私网
+            "http://127.0.0.1:7000/zxapi/services/query/findeletric?sign=a&data=b",
+            "http://169.254.169.254/latest/meta-data/?sign=a&data=b",
+            "http://10.0.0.1:7000/zxapi/services/query/findeletric?sign=a&data=b",
+            "http://localhost:7000/zxapi/services/query/findeletric?sign=a&data=b",
+            // 端口、路径、协议不符
+            "http://222.197.164.98:7001/zxapi/services/query/findeletric?sign=a&data=b",
+            "http://222.197.164.98/zxapi/services/query/findeletric?sign=a&data=b",
+            "http://222.197.164.98:7000/admin?sign=a&data=b",
+            "http://222.197.164.98:7000/zxapi/services/query/findeletric/../x?sign=a&data=b",
+            "https://222.197.164.98:7000/zxapi/services/query/findeletric?sign=a&data=b",
+            // userinfo（含 @ 主机混淆）、fragment
+            "http://u:p@222.197.164.98:7000/zxapi/services/query/findeletric?sign=a&data=b",
+            "http://222.197.164.98:7000@127.0.0.1:7000/zxapi/services/query/findeletric?sign=a&data=b",
+            "http://222.197.164.98:7000/zxapi/services/query/findeletric?sign=a&data=b#x",
+            // 缺签名参数
+            "http://222.197.164.98:7000/zxapi/services/query/findeletric?data=b",
+            "http://222.197.164.98:7000/zxapi/services/query/findeletric?sign=&data=b",
+            "http://222.197.164.98:7000/zxapi/services/query/findeletric",
+            "not a url",
+        ] {
+            assert!(gateway.validate(bad).is_none(), "accepted: {bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_follower_does_not_follow_redirects() {
+        // 网关返回 302 指向别处：专用客户端不跟随，得到的是 3xx 本身。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            let head = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, head.as_bytes()).await;
+        });
+        let gateway = loopback_gateway(port);
+        let url = gateway
+            .validate(&format!(
+                "http://127.0.0.1:{port}{GATEWAY_PATH}?sign=a&data=b"
+            ))
+            .expect("valid");
+        let resp = gateway.request(url).send().await.expect("send");
+        assert_eq!(resp.status(), StatusCode::FOUND);
     }
 
     #[test]

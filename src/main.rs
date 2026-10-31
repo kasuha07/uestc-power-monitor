@@ -25,7 +25,7 @@ fn print_usage() {
         "  uestc-power-monitor logout --clear  登出并彻底清除本地 cookie（含设备指纹，\n",
         "                                      下次登录视为新设备）\n",
         "\n",
-        "Web 默认地址: http://127.0.0.1:8080（访问密钥见启动日志）\n凭据与配置: 环境变量 UPM_* / 配置文件 / Docker Secrets（见 README）\n",
+        "Web 默认地址: http://127.0.0.1:8080（访问密钥见数据目录下的 web-access-token 文件）\n凭据与配置: 环境变量 UPM_* / 配置文件 / Docker Secrets（见 README）\n",
     ));
 }
 
