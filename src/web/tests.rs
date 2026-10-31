@@ -719,6 +719,31 @@ async fn config_save_writes_file_preserves_comments_and_applies_immediately() {
     assert!(applied.notify.enabled);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn config_save_tightens_permissive_file_mode_to_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new().await;
+    let path = fixture.use_config_file(&fixture.config_file_content(5));
+    // 模拟从 0644 示例直接复制得到的配置文件。
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    fixture
+        .config_json(serde_json::json!({"interval_seconds": 9}))
+        .await;
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // 已是 0600 的文件保存后保持 0600。
+    fixture
+        .config_json(serde_json::json!({"interval_seconds": 10}))
+        .await;
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
 #[tokio::test]
 async fn config_save_rejects_invalid_values_without_touching_the_file() {
     let mut fixture = Fixture::new().await;
